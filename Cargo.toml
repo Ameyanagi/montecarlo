@@ -1,0 +1,14 @@
+[package]
+name = "montecarlo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.0", features = ["derive"] }
+derive = "1.0.0"
+derive_more = { version = "2.1.1", features = ["from", "display", "index", "index_mut"] }
+rand = "0.10.0"
+ruviz = { version = "0.1.5", features = ["typst-math"] }
+strum = { version = "0.28.0", features = ["derive"] }
+tracing = "0.1.44"
+uom = "0.38.0"
