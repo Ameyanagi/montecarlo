@@ -526,12 +526,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72e3ae26c830a573f2e231fc2475f71fce4705609097cb9523abfc4007caed0b"
-
-[[package]]
 name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1309,9 +1303,9 @@ name = "montecarlo"
 version = "0.1.0"
 dependencies = [
  "clap",
- "derive",
  "derive_more",
  "rand 0.10.0",
+ "rayon",
  "ruviz",
  "strum 0.28.0",
  "tracing",

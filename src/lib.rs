@@ -7,18 +7,16 @@ use std::{
     sync::OnceLock,
     collections::HashMap,
     f64::consts::PI,
-    // cmp::min,    //  Not available for float !!! 
 };
-use tracing::debug;
+// use tracing::debug;
 use derive_more::{Index, IndexMut};
 use strum::{EnumCount};
+use rand::prelude::*;
+// use rayon::prelude::*;
 
 // use uom::si::f64::*;
 // use uom::si::{length::{millimeter, centimeter},reciprocal_length::{reciprocal_millimeter, reciprocal_centimeter}};
-// use uom::si::length::millimeter;
-// use uom::si::time::second;
 
-use rand::prelude::*;
 use ruviz::prelude::*;
 
 pub fn run() -> Result<()> {
@@ -28,47 +26,31 @@ pub fn run() -> Result<()> {
 
 
 fn partie_3_1() {
-    // let dz = Length::new::<centimeter>(0.01);
-
-    // let mu_a = 20. / dz;
-    // let mu_s = 0./ Length::new::<centimeter>(1.);
-    // let mu_t = mu_a + mu_s;
-
-    // let mu_x = 1.;
-    // let w = 1.;
-
-    // let m = 10.;
-
-    // let w_c = 0.1;
 
 }
 
-const NB_PHOTONS_1_2:i32 = 100;
+const NB_PHOTONS_1_2:i32 = 100_000;
 
-const UNIT_SCALE:f64 = 10.;
+const MM_PER_CM:f64 = 10.;
 const CM_PER_VXL:f64 = cm(0.001);
-const MM_PER_VXL:f64 = CM_PER_VXL * UNIT_SCALE;
+const MM_PER_VXL:f64 = CM_PER_VXL * MM_PER_CM;
 const VXL_PER_MM:f64 = 1./MM_PER_VXL;
 
 const VXLS_X_SIZE:i32 = 2_000;  //  2.0 cm
 const VXLS_Y_SIZE:i32 =   800;  //  0.8 cm
 const VXLS_Z_SIZE:i32 = 1_300;  //  1.3 cm
 
-const MAGIG_NUM_0: f64 = 2.303 * 150. / 64_500. / UNIT_SCALE; //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"  
+const MAGIG_NUM_0: f64 = 2.303 * 150. / 64_500. / MM_PER_CM; //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"  
 
 const SA_O2:f64 = 0.98;         //  Saturation en oxygène artériel de 98%
 const SV_O2:f64 = 0.9 * SA_O2;  //  Saturation en oxygène veineux est 10% moindre que l'arteriel
 const SEUIL_DE_POIDS_CRITIQUE:f64 = 0.01;
 
-//  En dessous d’un poids seuil critique (Wc) prédéterminé, le paquet a une chance sur M de continuer à être simulé, 
+//  En dessous d’un weight seuil critique (Wc) prédéterminé, le paquet a une chance sur M de continuer à être simulé, 
 //  sinon "il disparaı̂t". Pour éviter que de l’énergie disparaisse pris dans l'ensemble, lorsque le photon survie, 
 //  on multiplie son énergie par M afin de compenser pour les fois ou l’énergie disparait.
 const M:f64 = 10.;
 const M_INV:f64 = 1. / M;   //  Probabilité de ne pas disparitre
-
-const N1:f64 = 1.42;    //  indice de réfraction du stratum et de l'épiderme
-const N2:f64 = 1.39;    //  indice de réfraction du derme
-const N1_SUR_N2:f64 = N1/N2;    //  > 1   
 
 /// Coefficient d'anisotropie
 const G:f64 = 0.9;
@@ -392,41 +374,59 @@ fn water_hashmap(key: i32) -> Option<f64> {
         .copied()
 }
 
-#[derive(Index, IndexMut, Debug )]
-struct VoxelsXZ {
+struct Vxls {
     x_range: Range<i32>,
     y_range: Range<i32>,
     z_range: Range<i32>,
+}
+impl Vxls {
+    pub const fn new(x_size: i32, y_size: i32, z_size: i32) -> Self {
+        Self {
+            x_range : 0..x_size,
+            y_range : 0..y_size,
+            z_range : 0..z_size,
+        }
+    }
+    fn x_contains(&self, x: &i32) -> bool {
+        self.x_range.contains(x)
+    }
+    fn y_contains(&self, y: &i32) -> bool {
+        self.y_range.contains(y)
+    }
+    fn z_contains(&self, z: &i32) -> bool {
+        self.z_range.contains(z)
+    }
+}
+const VXLS:Vxls = Vxls::new(VXLS_X_SIZE, VXLS_Y_SIZE, VXLS_Z_SIZE);
+
+#[derive(Index, IndexMut, Debug )]
+struct VoxelsXZ {
     #[index]
     #[index_mut]
     vxls:Vec<Vec<f64>>,
 }
 impl VoxelsXZ {
-    fn new(x_size: i32, y_size: i32, z_size: i32) -> Self {
-        let x_range = 0..x_size;
-        let y_range = 0..y_size;
-        let z_range = 0..z_size;
+    fn new(x_size: i32, z_size: i32) -> Self {
         Self {
-            x_range,
-            y_range,
-            z_range,
             vxls: (0..x_size).map(|_|  
                            (0..z_size).map(|_| 0.).collect())
                         .collect(),
         }
     }
-    
-    fn hors_jeu(&self, pos: &VoxelPos) -> bool {
-          !self.x_range.contains(&pos.x) || !self.y_range.contains(&pos.y) || !self.z_range.contains(&pos.z)
+    fn add_at(&mut self, pos: &VoxelPos, delta_w: f64) {
+        self.vxls[pos.x as usize][pos.z as usize] += delta_w
+    }
+    fn at(&self, pos: &VoxelPos) -> f64 {
+        self.vxls[pos.x as usize][pos.z as usize]
     }
 }
 
 impl NumericData2D for VoxelsXZ {
     fn shape(&self) -> (usize, usize) {
-        (self.x_range.end as usize, self.z_range.end as usize)
+        (VXLS.x_range.end as usize, VXLS.z_range.end as usize)
     }
     fn try_collect_row_major_f64(&self) -> std::result::Result<Vec<f64>, ruviz::core::PlottingError> {
-        let mut values = Vec::with_capacity((self.x_range.end * self.z_range.end) as usize);
+        let mut values = Vec::with_capacity((VXLS.x_range.end * VXLS.z_range.end) as usize);
         for row in &self.vxls {
             //  In Voxels the y axis is displayed in revert and we want the log of the values to be heatmaped 
             values.extend(row.into_iter().rev().map(|f| f.log10()));
@@ -435,10 +435,28 @@ impl NumericData2D for VoxelsXZ {
     }
 }
 
+fn plot(vxl:&VoxelsXZ) -> Result<()> {
+    
+    Plot::new()
+        .heatmap(vxl, Some(HeatmapConfig::new()
+            .colorbar(true)
+            .colorbar_label("Énergie absorbée")
+            //  No way to scale the colorbar axis in log yet
+            ))
+        .ylim(VXLS_Z_SIZE as f64 * MM_PER_VXL, 0.)    
+        .xlim( 0., VXLS_X_SIZE as f64 * MM_PER_VXL)    
+        .ylabel("Profondeur (mm)")
+        .xlabel("Position en x(mm)")
+        .save(".heatmap.png")?;
+
+    Ok(())
+}
+
+
 fn partie_1_2() -> Result<()> {
     dbg!("partie_1_2: before Voxels allocation");
     
-    let mut a = VoxelsXZ::new(VXLS_X_SIZE, VXLS_Y_SIZE, VXLS_Z_SIZE);
+    let mut a = VoxelsXZ::new(VXLS_X_SIZE, VXLS_Z_SIZE);
     dbg!("partie_1_2: before monte_carlo()");
     monte_carlo(700, &mut a);
     // dbg!(&a);
@@ -454,38 +472,9 @@ const fn mm_to_vxl(mm: f64) -> i32 {
     (mm * VXL_PER_MM) as i32
 }
 
-struct SkinInVxl {
-    stratum_corneum_lower_z: i32,
-    epiderme_lower_z: i32,
-    papille_dermique_lower_z: i32,
-    derme_superieur_lower_z: i32,
-    derme_reticulaire_lower_z: i32,
-    derme_profond_lower_z: i32,
-}
-impl SkinInVxl {
-    fn new(stratum_corneum_dz_in_mm: f64, epiderme_dz_in_mm: f64, papille_dermique_dz_in_mm: f64, derme_superieur_dz_in_mm:f64, derme_reticulaire_dz_in_mm:f64, derme_profond_dz_in_mm: f64) -> Self {
-        
-        let stratum_corneum_lower_z  =                             mm_to_vxl(stratum_corneum_dz_in_mm);
-        let epiderme_lower_z         = stratum_corneum_lower_z   + mm_to_vxl(epiderme_dz_in_mm);
-        let papille_dermique_lower_z = epiderme_lower_z          + mm_to_vxl(papille_dermique_dz_in_mm);
-        let derme_superieur_lower_z  = papille_dermique_lower_z  + mm_to_vxl(derme_superieur_dz_in_mm);
-        let derme_reticulaire_lower_z= derme_superieur_lower_z   + mm_to_vxl(derme_reticulaire_dz_in_mm);
-        let derme_profond_lower_z    = derme_reticulaire_lower_z + mm_to_vxl(derme_profond_dz_in_mm);
-        Self {
-            stratum_corneum_lower_z,
-            epiderme_lower_z,
-            papille_dermique_lower_z,
-            derme_superieur_lower_z,
-            derme_reticulaire_lower_z,
-            derme_profond_lower_z,
-        }
-    }
-}
-
-#[derive(Debug, EnumCount, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, EnumCount, Clone, Copy, PartialEq)]
 enum SkinLayerKind {
-    #[default]
-    StatumCorneum,
+    StratumCorneum,
     Epiderme,
     PapileDermique,
     DermeSuperieur,
@@ -501,168 +490,251 @@ struct SkinLayer {
     v_b : f64,
     v_w : f64,
 }
-impl SkinLayer {
-    fn mu_a(&self, wavelength: f64, mu_w: f64, mu_art: f64, mu_vei: f64, mu_a_baseline: f64) -> f64 {
-        let Self { kind, v_w, v_b, .. } = self;
-        MM_PER_VXL * match kind {
-            StatumCorneum | Epiderme =>  
-                V_MEL * (6.6e+10 * wavelength.powf(-3.33) / UNIT_SCALE)  +  v_w * mu_w  +  (1. - (V_MEL + v_w)) * mu_a_baseline,
+
+const INDICE_REFRAC_AIR:f64 = 1.000293; // à T.P.N. Unused, but for isometric solution.
+
+const SKIN_LAYERS: [SkinLayer; SkinLayerKind::COUNT] = [
+    SkinLayer {dz_in_mm: 0.02, indice_refrac: 1.42, v_b: 0.00, v_w: 0.05, kind: StratumCorneum},
+    SkinLayer {dz_in_mm: 0.25, indice_refrac: 1.42, v_b: 0.00, v_w: 0.20, kind: Epiderme},
+    SkinLayer {dz_in_mm: 0.10, indice_refrac: 1.39, v_b: 0.04, v_w: 0.50, kind: PapileDermique},
+    SkinLayer {dz_in_mm: 0.08, indice_refrac: 1.39, v_b: 0.30, v_w: 0.60, kind: DermeSuperieur},
+    SkinLayer {dz_in_mm: 0.20, indice_refrac: 1.39, v_b: 0.04, v_w: 0.70, kind: DermeReticulaire},
+    SkinLayer {dz_in_mm: 0.30, indice_refrac: 1.39, v_b: 0.01, v_w: 0.70, kind: DermeProfond},
+];
+
+
+#[derive(Debug)]
+struct SkinLayerAtWl {
+    layer: &'static SkinLayer,
+    
+    indice_refrac_ratio: f64,
+    vxl_z_range : Range<i32>,
+    
+    mu_t: f64,          //  in reciprocal_vxl or vxl^-1
+    mu_a_on_mu_t: f64,
+}
+impl SkinLayerAtWl {
+    fn kind(&self) -> SkinLayerKind {
+        self.layer.kind
+    }
+
+    fn indice_refrac(&self) -> f64 {
+        self.layer.indice_refrac
+    }
+    
+    fn model_at(&mut self, wavelength: f64, val_hb_0: f64, val_hb_1: f64, val_water: f64) {
+        //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
+        let mu_a_baseline=  7.84e-7 * wavelength.powf(-3.255) / MM_PER_CM;   //  reciprocal_mm
+        
+        let mu_absorption_oxyhemoglobine = val_hb_0 * MAGIG_NUM_0; // reciprocal_mm
+        let mu_a_hemoglobine = val_hb_1 * MAGIG_NUM_0;  //  reciprocal_mm
+    
+        let mu_w = val_water / MM_PER_CM;  //  reciprocal_mm
+
+        //  Coeff artere & veine
+        let (mu_art, mu_vei) = (
+            SA_O2 * mu_absorption_oxyhemoglobine + (1. - SA_O2) * mu_a_hemoglobine,
+            SV_O2 * mu_absorption_oxyhemoglobine + (1. - SV_O2) * mu_a_hemoglobine );
+
+        let SkinLayer { kind, v_w, v_b, .. } = *self.layer;
+        
+        let mu_a = MM_PER_VXL * match kind {
+            StratumCorneum | Epiderme =>  
+                V_MEL * (6.6e+10 * wavelength.powf(-3.33) / MM_PER_CM)  +  v_w * mu_w  +  (1. - (V_MEL + v_w)) * mu_a_baseline,
             _ => {  //  Tout sous l'Epiderme
-                let v_a = *v_b / 2.;     //  split 50-50 with v_v
+                let v_a = v_b / 2.;     //  split 50-50 with v_v
                 let v_v = v_a;          //  split 50-50 with v_a
                 v_a * mu_art  +  v_v * mu_vei  +  v_w * mu_w  +  (1.- (v_a + v_v + v_w)) * mu_a_baseline
             },                    
-        }
+        };
+        self.mu_t = mu_a + MU_S;
+        self.mu_a_on_mu_t = mu_a / self.mu_t;
     }
     
 }
 
-const INDICE_REFRAC_AIR:f64 = 1.000293; // à T.P.N. UNused but for isometric solution.
-
-const SKIN_LAYERS: [SkinLayer; SkinLayerKind::COUNT] = [
-    SkinLayer {kind: StatumCorneum,     dz_in_mm: 0.02, indice_refrac: 1.42, v_b: 0.00, v_w: 0.05, },
-    SkinLayer {kind: Epiderme,          dz_in_mm: 0.25, indice_refrac: 1.42, v_b: 0.00, v_w: 0.20, },
-    SkinLayer {kind: PapileDermique,    dz_in_mm: 0.10, indice_refrac: 1.39, v_b: 0.04, v_w: 0.50, },
-    SkinLayer {kind: DermeSuperieur,    dz_in_mm: 0.08, indice_refrac: 1.39, v_b: 0.30, v_w: 0.60, },
-    SkinLayer {kind: DermeReticulaire,  dz_in_mm: 0.20, indice_refrac: 1.39, v_b: 0.04, v_w: 0.70, },
-    SkinLayer {kind: DermeProfond,      dz_in_mm: 0.30, indice_refrac: 1.39, v_b: 0.01, v_w: 0.70, },
-];
-
-fn vxl_z_ranges() -> [Range<i32>; SkinLayerKind::COUNT] {
-    let mut dz_in_vxl_acc = 0;
-    SKIN_LAYERS.map(|skin_layer| { 
-        let dz_in_vxl_start = dz_in_vxl_acc; 
-        dz_in_vxl_acc += mm_to_vxl(skin_layer.dz_in_mm);
-        dz_in_vxl_start..dz_in_vxl_acc
-    })
-}
-fn indice_refrac_ratios() -> [f64; SkinLayerKind::COUNT] {
-    let mut indice_refrac_denominateur = INDICE_REFRAC_AIR;
-    SKIN_LAYERS.map(|skin_layer| { 
-        let indice_refrac_numerateur = indice_refrac_denominateur /* precedent*/ ;
-        indice_refrac_denominateur = skin_layer.indice_refrac;
-        indice_refrac_numerateur / indice_refrac_denominateur
-    })
-}
-
-static SKIN: OnceLock<Skin> = OnceLock::new();
+// static SKIN: OnceLock<Skin> = OnceLock::new();
 #[derive(Debug, )]
 struct Skin {
-    layers: [SkinLayer; SkinLayerKind::COUNT],
-    vxl_z_ranges: [Range<i32>; SkinLayerKind::COUNT],
-    indice_refrac_ratios: [f64; SkinLayerKind::COUNT],
+    g_square: f64,
+    layers: [SkinLayerAtWl; SkinLayerKind::COUNT],
+    wavelength_i : i32,
 }
 
-impl Skin {
-    fn new() -> Self {
+const LOWEST_WAVELENGTH:i32 = 600;  // nanometer
 
-        Self {
-            layers: SKIN_LAYERS,
-            vxl_z_ranges : vxl_z_ranges(),
-            indice_refrac_ratios : indice_refrac_ratios(),
-        }
+impl Default for Skin {
+    fn default() -> Self {
+        let mut dz_in_vxl_acc = 0;
+        let mut indice_refrac_denominateur = INDICE_REFRAC_AIR;
         
-    }
-    fn vxl_z_ranges() -> &'static [Range<i32>; SkinLayerKind::COUNT] {
-        &SKIN.get_or_init(Skin::new).vxl_z_ranges
-    }
-    fn indice_refrac_ratios() -> &'static [f64; SkinLayerKind::COUNT] {
-        &SKIN.get_or_init(Skin::new).indice_refrac_ratios
-    }
-    fn vxl_z_range(skin_layer_kind: SkinLayerKind) -> Range<i32> {
-        Self::vxl_z_ranges()[skin_layer_kind as usize].clone()
-    }
-    fn indice_refrac_ratio(skin_layer_kind: SkinLayerKind) -> f64 {
-        Self::indice_refrac_ratios()[skin_layer_kind as usize]
-    }
-    fn mu_t(mu_a:f64) -> f64 {
-        mu_a + MU_S
-    }
-    fn skin_layer_kind(photon_pos_z: i32) -> Option<(i32, SkinLayerKind)> {
-        SKIN_LAYERS.iter()
-            .find_map(|skin_layer| {
-                let vxl_z_range = Self::vxl_z_range(skin_layer.kind);
-                if vxl_z_range.contains(&photon_pos_z) {
-                    Some((vxl_z_range.start, skin_layer.kind))
-                } else {None}
-            })
-    }
+        Self { 
+            g_square: G.powi(2),
+            layers: SKIN_LAYERS.iter().map(|skin_layer| { 
+                let SkinLayer { dz_in_mm, indice_refrac, .. } = skin_layer;
 
-    fn absorption(photon: &Photon) -> f64 {
-        let Photon { pos, path_seg, .. } = photon; 
-     
-        let src_pos_z = pos.z;
-        if let Some((_, src_skin_layer_kind)) = Self::skin_layer_kind(pos.z) {
-            
-            let dst_photon_pos_z = src_pos_z + path_seg.dz();
-            if let Some((dst_layer_first_vxl_z, dst_skin_layer_kind)) =  Self::skin_layer_kind(dst_photon_pos_z) {
-
-                //  Trans skin layers with different indice_refrac.
-                if src_skin_layer_kind != dst_skin_layer_kind {
-                    let refrac_ratio = Self::indice_refrac_ratio(dst_skin_layer_kind);
-                    if 1.0 != refrac_ratio {
-                        debug!("src: {src_skin_layer_kind:?}, dst: {dst_skin_layer_kind:?} refrac_ratio: {refrac_ratio:?}, dst_layer_first_vxl_z: {dst_layer_first_vxl_z:?}");
-                    }
+                let dz_in_vxl_start = dz_in_vxl_acc; 
+                dz_in_vxl_acc += mm_to_vxl(*dz_in_mm);
+                
+                let indice_refrac_numerateur = indice_refrac_denominateur /* precedent*/ ;
+                indice_refrac_denominateur = *indice_refrac;
+                
+                SkinLayerAtWl {
+                    layer: skin_layer,
+                    // kind, /*dz_in_mm,*/ indice_refrac, v_b, v_w,
+                    
+                    indice_refrac_ratio: indice_refrac_numerateur / indice_refrac_denominateur,
+                    vxl_z_range: dz_in_vxl_start..dz_in_vxl_acc,
+                    
+                    mu_t: 0.,
+                    mu_a_on_mu_t: 0.,
                 }
-            }
+            }).collect::<Vec<_>>().try_into().expect("SKIN_LAYERS [SkinLayer; SkinLayerKind::COUNT] to SkinLayerAtWl[SkinLayerAtWl; SkinLayerKind::COUNT]"),
+            wavelength_i: LOWEST_WAVELENGTH,
         }
-     
-        0.
     }
 }
-
-#[derive(Debug, )]
-struct PhotonProfile {
-    wavelength: f64,
-    mu_ts : [f64;  SkinLayerKind::COUNT],
-    mu_a_on_mu_ts : [f64;  SkinLayerKind::COUNT],
-    rng: ThreadRng,
-}
-
-impl PhotonProfile {
-    fn try_new(wavelength_i:i32) -> Option<Self> {
-        let wavelength = wavelength_i as f64;
-        if let Some((val_hb_0, val_hb_1)) = hb_at_index(wavelength_i)  &&
-           let Some(val_water) = water_hashmap(wavelength_i) {
-
-            //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
-            let mu_a_baseline=  7.84e-7 * wavelength.powf(-3.255) / UNIT_SCALE;   //  reciprocal_mm
+impl Skin {
+    fn try_model_at(&mut self, wavelength_i: i32) -> Option<&mut Self> {
+        if let Some((val_hb_0, val_hb_1)) = hb_at_index(wavelength_i)
+        && let Some(val_water) = water_hashmap(wavelength_i) {
             
-            let mu_absorption_oxyhemoglobine = val_hb_0 * MAGIG_NUM_0; // reciprocal_mm
-            let mu_a_hemoglobine = val_hb_1 * MAGIG_NUM_0;  //  reciprocal_mm
-        
-            let mu_w = val_water / UNIT_SCALE;  //  reciprocal_mm
-
-            //  Coeff artere & veine
-            let (mu_art, mu_vei) = (
-                SA_O2 * mu_absorption_oxyhemoglobine + (1. - SA_O2) * mu_a_hemoglobine,
-                SV_O2 * mu_absorption_oxyhemoglobine + (1. - SV_O2) * mu_a_hemoglobine );
-                   
-            let mu_as = SKIN_LAYERS.map(|skin_layer| skin_layer.mu_a(wavelength, mu_w, mu_art, mu_vei, mu_a_baseline));
+            let wavelength = wavelength_i as f64;
             
-            Some(Self {
-                wavelength,
-                mu_ts: mu_as.map(|mu_a| Skin::mu_t(mu_a)),
-                mu_a_on_mu_ts: mu_as.map(|mu_a| mu_a / Skin::mu_t(mu_a)),
-                rng:  rand::rng(),
-            })
+            for skin_layer_at_wl in self.layers.iter_mut() {
+                skin_layer_at_wl.model_at(wavelength, val_hb_0, val_hb_1, val_water);
+            }
+            self.wavelength_i = wavelength_i;
+            Some(self)
         } else { None }
     }
     
-    fn mu_t(&self, skin_layer_kind: SkinLayerKind) -> f64 {
-        self.mu_ts[skin_layer_kind as usize]
+    fn skin_layer(&self, skin_layer_kind: SkinLayerKind) -> &SkinLayerAtWl {
+        &self.layers[skin_layer_kind as usize]
     }
-    
-    fn new_path_seg_len(&mut self, src_skin_layer_kind: SkinLayerKind) -> f64 {
+    fn new_path_seg_len_in_vxl(&self, src_skin_layer_kind: SkinLayerKind, rng: &mut ThreadRng) -> f64 {
         //  parcours du groupe de photon pour cette itération
-        let mut xsi_1:f64 = self.rng.random();
-        while xsi_1 == 0. {             //  Exclure 0 de l'interval parce que ln(0) = ∞, ou NaN.
-            xsi_1 = self.rng.random();
+        let mut xsi_1:f64 = rng.random::<f64>();
+        while xsi_1 == 0. {             //  Exclude 0 from the interval because ln(0) = ∞, or NaN.
+            xsi_1 = rng.random::<f64>();
         }
         //  -xsi_1.ln() runs from 0. to very large (f64::MAX ?).
-        -xsi_1.ln() / self.mu_t(src_skin_layer_kind)
+        -xsi_1.ln() / self.skin_layer(src_skin_layer_kind).mu_t     //  in vxl
+    }
+    
+    fn skin_layer_kind(&self, photon_pos_z: i32) -> Option<&SkinLayerAtWl> {
+        self.layers.iter()
+            .find(|skin_layer| skin_layer.vxl_z_range.contains(&photon_pos_z))
+    }
+    
+    fn same_refrac(&self, dir: &UnitVec, rng: &mut ThreadRng) -> UnitVec {
+        // xsi_2
+        let phi = 2.0 * PI * rng.random::<f64>();  
+        let cos_phi = phi.cos();
+        let sin_phi = phi.sin();
+        
+        //  xsi_3
+        let mut cos_theta = 1. / (2.* G) * (1. + self.g_square - ((1. - self.g_square)/(1. - G + 2. * G * rng.random::<f64>())).powi(2)); 
+        //  Ici aussi, pour éviter les erreurs arithmétiques flottantes cos doit être entre (-1, 1)
+        cos_theta = cos_theta.clamp(-1., 1.);
+        let sin_theta = co_sin(cos_theta);
+        
+        if dir.uz.abs() == 1. {
+            UnitVec::new(   
+                sin_theta * sin_phi,    //  dir.ux
+                sin_theta * cos_phi,    //  dir.uy
+                cos_theta,              //  dir.uz
+            )
+        } else {
+            let not_uz = co_sin(dir.uz);
+            let uz_cos_phi = dir.uz * cos_phi;
+            UnitVec::new(   
+                sin_theta * (dir.ux * uz_cos_phi  -  dir.uy * sin_phi) / not_uz  +  cos_theta * dir.ux,
+                sin_theta * (dir.uy * uz_cos_phi  -  dir.ux * sin_phi) / not_uz  +  cos_theta * dir.uy,
+                dir.uz * cos_theta  -  not_uz * sin_theta * cos_phi
+            )
+        }
+    }
+    
+    fn diff_refrac(&self, n1: f64, n2: f64, n1_on_n2: f64, dir: &UnitVec, rng: &mut ThreadRng) -> (UnitVec, f64) {
+        let cos_theta_i = dir.uz.abs().clamp(0., 1.);   //  cos_theta_i in [0., 1.] range
+        let sin_theta_i = co_sin(cos_theta_i);              //  sin_theta_i in [0., 1.] range too.
+        
+        let sin_theta_t = (n1_on_n2 * sin_theta_i).clamp(0.0, 1.0);  //  Loi de Snell-Descartes
+
+        //  Calcul de réflexion
+        if 1.0 == sin_theta_t {     //  Complete internal reflexion
+            //  rng.random::<f64>() generates a random number over 0.0..1.0, so always < 1.0 
+            //  therefore if 1.0 == sin_theta_t, r= sin_theta_t is guarantied > rng.random::<f64>()
+            //  without even having to call it. 
+            //  Also r_square is 1.0, and delta_weight = (1. - r_square) * weight = 0
+            (dir.uz_reflected(), 0.)
+        } else {
+            let cos_theta_t = co_sin(sin_theta_t);
+            let r =  (n1 * cos_theta_i  -  n2 * cos_theta_t) / (n1 * cos_theta_i  +  n2 * cos_theta_t);
+            let r_square = r.powi(2);
+            
+            if rng.random::<f64>() < r {                   //  xsi_5 <  r  : Reflexion
+                       //  (new_dir, delta_w_coeff)
+                (dir.uz_reflected(), (1. - r_square) )
+            } else {                                    //  xsi_5 >= r  : Transmission    
+                (   UnitVec::new(
+                        dir.ux * n1_on_n2,  //  dir.ux
+                        dir.uy * n1_on_n2,  //  dir.uy
+                        cos_theta_t,        //  dir.uz
+                    ),              r_square)
+            }                   //  delta_w_coeff
+        }
     }
 
+    fn absorption(&self, photon: &mut Photon, rng: &mut ThreadRng) -> Option<(UnitVec, f64)> {
+        // let Photon { pos, path_seg, .. } = photon; 
+        let (src_skin_layer_kind, n1) = {
+            let src_skin_layer = self.skin_layer(photon.skin_layer_kind).layer;
+            
+            (src_skin_layer.kind, src_skin_layer.indice_refrac)
+        };
+        let path_seg = photon.path_seg;
+        let src_pos_z = photon.pos.z;
+        
+        // Some(dst_skin_layer) means within voxels in z 
+        let op_dst_skin_layer = self.skin_layer_kind(src_pos_z + photon.path_seg.dz());
+        if let Some(dst_skin_layer) = op_dst_skin_layer {
+            let mu_a_on_mu_t = dst_skin_layer.mu_a_on_mu_t;
+            let dst_skin_layer_kind = dst_skin_layer.kind();
+            
+            //  Trans skin layers 
+            if src_skin_layer_kind != dst_skin_layer_kind {
+                //  Stop at skin layer transition for this iteration.
+                
+                let moving_len = path_seg.new_len_in_vxl(dst_skin_layer.vxl_z_range.start - src_pos_z);
+                if photon.move_of(moving_len, path_seg.len_in_vxl() - moving_len, dst_skin_layer_kind)
+                        .is_within_xy_of_vxls() { // skin layer transition is within voxels in z 
+                
+                    //  skin layers with different indice_refrac: the path_seg.dir will change
+                    if 1.0 != dst_skin_layer.indice_refrac_ratio {
+                        Some(self.diff_refrac(n1, dst_skin_layer.indice_refrac(), 
+                                            dst_skin_layer.indice_refrac_ratio, 
+                                            &photon.path_seg.dir, rng))
+                    }
+                    else {
+                        
+                        Some((self.same_refrac(&photon.path_seg.dir, rng), mu_a_on_mu_t))
+                    }
+                }
+                else { None }   //  not within voxels.
+            }
+            else {  //  photon stays in the same skin layer
+                if photon.move_of(path_seg.len_in_vxl(), 0., dst_skin_layer_kind)
+                        .is_within_xy_of_vxls() { // therefore photon stays within voxels in z
+
+                    Some((self.same_refrac(&path_seg.dir, rng), mu_a_on_mu_t))
+                }
+                else { None }   //  not within voxels.
+            }
+        }   // ! Some(dst_skin_layer) means not within voxels in z 
+        else { None }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -671,66 +743,152 @@ struct VoxelPos {
     y: i32,
     z: i32,
 }
+impl VoxelPos {
+    fn x(&self) -> i32 {
+        self.x
+    }
+    fn z(&self) -> i32 {
+        self.z
+    }
+    fn is_within_vxls(&self) -> bool {
+          VXLS.x_contains(&self.x) && VXLS.y_contains(&self.y) && VXLS.z_contains(&self.z)
+    }
+    fn is_within_xy_of_vxls(&self) -> bool {
+          VXLS.x_contains(&self.x) && VXLS.y_contains(&self.y)
+    }
+    fn move_of(&mut self, delta_pos: DeltaVoxelPos) {
+        self.x += delta_pos.dx;
+        self.y += delta_pos.dy;
+        self.z += delta_pos.dz;
+    }
+}
 #[derive(Debug, Clone, Copy)]
-struct VecUnit{
+struct DeltaVoxelPos {
+    dx: i32,
+    dy: i32,
+    dz: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UnitVec{
     ux: f64,
     uy: f64,
     uz: f64,
 }
-impl Default for VecUnit {
+impl Default for UnitVec {
     fn default() -> Self {
         Self {ux: 0., uy: 0., uz: 1.,}
     }
 }
-#[derive(Debug, Clone, Copy, Default)]
-struct PhotonPathSeg {
-    len : f64,
-    dir : VecUnit,
-}
 
-impl PhotonPathSeg {
+impl UnitVec {
+    fn new(ux: f64, uy: f64, uz: f64) -> Self {
+        Self {ux, uy, uz}
+    }
     
-    fn set_dir(&mut self, ux_uy_uz:&(f64, f64, f64)) {
-        self.dir.ux = ux_uy_uz.0;
-        self.dir.uy = ux_uy_uz.1;
-        self.dir.uz = ux_uy_uz.2;
+    fn delta_pos(&self, len: f64) -> DeltaVoxelPos {
+        //  as i32 returns i32:MAX or i32::MIN on overflow by f64, 
+        //  which will definitely result in !photon.pos.is_within(&vxls)
+        DeltaVoxelPos {
+            dx: (self.ux * len) as i32,
+            dy: (self.uy * len) as i32,
+            dz: (self.uz * len) as i32,
+        }
     }
-    fn dz(&self) -> i32 {
-        (self.len * self.dir.uz) as i32
-    }
-    fn generate_next(self, len: f64) -> Self {
+    fn uz_reflected(&self) -> Self {
+        //  Only .uz is reflected the other unitary element ux and uy stay the same.
         Self {
-            len,
-            dir: self.dir
+            ux:  self.ux,
+            uy:  self.uy,
+            uz: -self.uz,
         }
     }
 }
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PhotonPathSeg {
+    len_in_vxl : f64,
+    dir : UnitVec,
+}
+
+impl PhotonPathSeg {
+    pub fn new(len_in_vxl: f64) -> Self {
+        Self {
+            len_in_vxl,
+            dir: UnitVec::default()
+        }
+    }
+    
+    fn len_in_vxl(&self) -> f64 {
+        self.len_in_vxl
+    }
+    fn set_len_in_vxl(&mut self, len_in_vxl: f64) {
+        // dbg!(&len_in_vxl);
+        self.len_in_vxl = len_in_vxl;
+    }
+    fn set_dir(&mut self, new_dir: UnitVec) {
+        self.dir.ux = new_dir.ux;
+        self.dir.uy = new_dir.uy;
+        self.dir.uz = new_dir.uz;
+    }
+    fn dz(&self) -> i32 {
+        (self.len_in_vxl * self.dir.uz) as i32
+    }
+    fn new_len_in_vxl(&self, dz: i32) -> f64 {
+        dz as f64 / self.dir.uz
+    }
+}
 #[derive(Debug)]
-struct Photon<'a> {
-    profile: &'a mut PhotonProfile,
-    poids: f64,
+struct Photon {
+    // skin: &'a mut Skin,
+    weight: f64,
     pos: VoxelPos,
     path_seg: PhotonPathSeg,
     skin_layer_kind: SkinLayerKind,
 }
 
-impl<'a> Photon<'a> {
-    fn new(profile: &'a mut PhotonProfile) -> Self {
+impl Photon {
+    fn new(skin: &Skin, rng: &mut ThreadRng) -> Self {
+        let skin_layer_kind= StratumCorneum;
+        let path_seg = PhotonPathSeg::new(skin.new_path_seg_len_in_vxl(skin_layer_kind, rng));
+
         Self {
-            profile, 
-            poids: 1.0,
+            weight: 1.0,
             pos: VoxelPos { 
                 x: VXLS_X_SIZE / 2,
                 y: VXLS_Y_SIZE / 2,
                 z: 0,
             },
-            path_seg: PhotonPathSeg::default(),
-            skin_layer_kind: SkinLayerKind::default(),
+            path_seg,
+            skin_layer_kind
         }
     }
     
-    fn generate_next_path_seg(&mut self) {
-        self.path_seg.generate_next(self.profile.new_path_seg_len(self.skin_layer_kind));
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+    fn decrease_weight_by(&mut self, delta_w: f64)  {
+        self.weight -= delta_w;
+    }
+    fn scale_weight_by(&mut self, m: f64)  {
+        self.weight *= m;
+    }
+
+    fn pos(&self) -> &VoxelPos {
+        &self.pos
+    }
+    fn path_seg_len_in_vxl(&self) -> f64 {
+        self.path_seg.len_in_vxl()
+    }
+    
+    fn generate_next_path_seg(&mut self, skin: &Skin, rng: &mut ThreadRng) {
+        self.path_seg.set_len_in_vxl(skin.new_path_seg_len_in_vxl(self.skin_layer_kind, rng));
+    }
+                   
+    fn move_of(&mut self, moving_len:f64, remaining_len: f64, skin_layer_kind: SkinLayerKind) -> &VoxelPos {
+        self.pos.move_of(self.path_seg.dir.delta_pos(moving_len));
+        self.path_seg.set_len_in_vxl(remaining_len);
+        self.skin_layer_kind = skin_layer_kind;
+        &self.pos
     }
 }
 
@@ -741,266 +899,55 @@ fn co_sin(sin_or_cos:f64) -> f64 {
 
 
 /// wavelength in nm 
-fn monte_carlo1(wavelength_i:i32, _a:&mut VoxelsXZ) {
-
-    if let Some(mut photon_profile) = PhotonProfile::try_new(wavelength_i) {
-        for _n_th in 0..NB_PHOTONS_1_2 {
-            let mut  photon = Photon::new(&mut photon_profile);
-            dbg!(&photon);
+fn monte_carlo(wavelength_i:i32, vxls:&mut VoxelsXZ) {
+    let mut skin = Skin::default();
+    if let Some(skin) = skin.try_model_at(wavelength_i) {
+        // dbg!(&skin);
+        // let _:i32 = (0..NB_PHOTONS_1_2).into_par_iter().map(|nth_photon| {
+        let _:i32 = (0..NB_PHOTONS_1_2).map(|nth_photon| {
+            // Each thread gets its own thread-local RNG.
+            // This is fast and non-blocking.
+            let mut rng = rand::rng();  
+            let mut  photon = Photon::new(skin, &mut rng);
+            // if nth_photon % 1_000 == 0 { dbg!(&nth_photon, &photon); }
             
-            while SEUIL_DE_POIDS_CRITIQUE < photon.poids {
-                photon.generate_next_path_seg();
-                dbg!(&photon);
-                break;
-            }
-            
-        }
-    }
-}
-
-
-fn plot(vxl:&VoxelsXZ) -> Result<()> {
-    
-    Plot::new()
-        .heatmap(vxl, Some(HeatmapConfig::new()
-            .colorbar(true)
-            .colorbar_label("Énergie absorbée")
-            //  No way to scale the colorbar axis in log yet
-            ))
-        .ylim(VXLS_Z_SIZE as f64 * CM_PER_VXL, 0.)    
-        .xlim( 0., VXLS_X_SIZE as f64 * CM_PER_VXL)    
-        .ylabel("Profondeur (mm)")
-        .xlabel("Position en x(mm)")
-        .save(".heatmap.png")?;
-
-    Ok(())
-}
-// region:      --- Absorption funtions
-
-// type Cm = uom::si::Quantity<(dyn uom::si::Dimension<I = uom::typenum::Z0, J = uom::typenum::Z0, Kind = (dyn uom::Kind + 'static), L = uom::typenum::PInt<uom::typenum::UInt<uom::typenum::UTerm, uom::typenum::B1>>, M = uom::typenum::Z0, N = uom::typenum::Z0, T = uom::typenum::Z0, Th = uom::typenum::Z0> + 'static), (dyn uom::si::Units<f64, amount_of_substance = uom::si::amount_of_substance::mole, electric_current = uom::si::electric_current::ampere, length = uom::si::length::meter, luminous_intensity = uom::si::luminous_intensity::candela, mass = uom::si::mass::kilogram, thermodynamic_temperature = uom::si::thermodynamic_temperature::kelvin, time = uom::si::time::second> + 'static), f64>;
-// fn cm(cm :f64) -> Cm {
-//     Length::new::<centimeter>(cm)
-// }
-
-/// Returns mu_a_baseline
-fn absorption_baseline(wavelength:f64) -> f64 {
-    //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
-    7.84e-7 * wavelength.powf(-3.255) / UNIT_SCALE
-}
-
-/// Returns (mu_art, mu_vei) le mu des artériel et veineux
-fn coeff_artere_veine( mu_absorption_oxyhemoglobine: f64, mu_a_hemoglobine: f64) -> (f64, f64){
-    (   SA_O2 * mu_absorption_oxyhemoglobine + (1. - SA_O2) * mu_a_hemoglobine,
-        SV_O2 * mu_absorption_oxyhemoglobine + (1. - SV_O2) * mu_a_hemoglobine )
-}
-
-/// Return mu_a
-fn absorption_couche(v_a:f64, mu_art:f64, v_v:f64, mu_vei:f64, v_w:f64, mu_w:f64, mu_a_baseline:f64) -> f64 {
-    v_a * mu_art  +  v_v * mu_vei  +  v_w * mu_w  +  (1.- (v_a + v_v + v_w)) * mu_a_baseline
-}
-
-/// Return mu_a_epi
-fn absorption_epiderme(wavelength:f64, v_w_epi:f64, mu_w_epi:f64, mu_a_baseline:f64) -> f64 {
-            //  mu_a_mel : "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
-    V_MEL * (6.6e+10 * wavelength.powf(-3.33) / UNIT_SCALE)  +  v_w_epi * mu_w_epi  +  (1. - (V_MEL + v_w_epi)) * mu_a_baseline
-}
-// endregion:   --- Absorption functions
-
-
-/// wavelength in nm 
-fn monte_carlo(wavelength_i:i32, a:&mut VoxelsXZ) {
-
-    let wavelength_f = wavelength_i as f64;
-    let g_square = G.powi(2);
-            
-    if let Some((val_hb_0, val_hb_1)) = hb_at_index(wavelength_i)  &&
-       let Some(val_water) = water_hashmap(wavelength_i) {
-
-        let _dz = CM_PER_VXL; 
-        let dz_scaling = MM_PER_VXL;
-
-        let mu_a_baseline = absorption_baseline(wavelength_f); //  #mm^-1
-        let mu_absorption_oxyhemoglobine = val_hb_0 * MAGIG_NUM_0; // mm^-1
-        let mu_a_hemoglobine = val_hb_1 * MAGIG_NUM_0;  //  mm^-1
-        let mu_w = val_water / UNIT_SCALE;  //  mm^-1
-        let (mu_art, mu_vei) = coeff_artere_veine(mu_absorption_oxyhemoglobine, mu_a_hemoglobine);
-        let mu_s = 20.1* dz_scaling; 
-        
-        let add_to = |prev_z: i32, increment: f64| prev_z + (increment as i32);
-        let z_stratum = add_to(0, cm(0.02) / dz_scaling);
-        let z_epiderme = add_to( z_stratum, cm(0.25) / dz_scaling);
-        let z_papille = add_to( z_epiderme, cm(0.1) / dz_scaling);
-        let z_derme_superieur = add_to( z_papille, cm(0.08) / dz_scaling);
-        let z_derme_reticulaire = add_to( z_derme_superieur, cm(0.2) / dz_scaling);
-        let z_derme_profond = add_to( z_derme_reticulaire, cm(0.2) / dz_scaling);
-
-
-        let mut rng = rand::rng();  //  random number generator
-
-        
-        for n_th in 0..NB_PHOTONS_1_2 {
-
-            let mut x = VXLS_X_SIZE / 2;
-            let mut y = VXLS_Y_SIZE / 2;
-            let mut z: i32 = 0;
-
-            let hors_jeu =  |x, y, z|  !(0..VXLS_X_SIZE).contains(&x) || !(0..VXLS_Y_SIZE).contains(&y)   ||  !(0..VXLS_Z_SIZE).contains(&z);
-
-            let mut poids = 1.;     //  poids du photon
-            //  parcours du groupe de photon pour cette itération
-            let mut prcr = PhotonPathSeg {   
-                len: 0.,
-                dir: VecUnit { ux: 0., uy: 0., uz: 1. }
-            };
-
-
-            while SEUIL_DE_POIDS_CRITIQUE < poids {
-
-                let mut mu_a = if z <= z_stratum {
-                    absorption_epiderme(wavelength_f, 0.05, mu_w, mu_a_baseline)
-                } else if z_stratum < z && z <= z_epiderme {
-                    absorption_epiderme(wavelength_f, 0.20, mu_w, mu_a_baseline)
-                } else if z_epiderme < z && z <= z_papille {
-                    let v_b = 0.04;
-                    let half_v_b = v_b / 2.;
-                    absorption_couche(half_v_b, mu_art, half_v_b, mu_vei, 0.5, mu_w, mu_a_baseline)                           
-                } else if z_papille < z && z <= z_derme_superieur {
-                    let v_b = 0.3;
-                    let half_v_b = v_b / 2.;
-                    absorption_couche(half_v_b, mu_art, half_v_b, mu_vei, 0.6, mu_w, mu_a_baseline)                           
-                } else if z_derme_superieur < z && z <= z_derme_reticulaire {
-                    let v_b = 0.04;
-                    let half_v_b = v_b / 2.;
-                    absorption_couche(half_v_b, mu_art, half_v_b, mu_vei, 0.7, mu_w, mu_a_baseline)                           
-                } else if z_derme_reticulaire < z && z <= z_derme_profond {
-                    let v_b = 0.1;
-                    let half_v_b = v_b / 2.;
-                    absorption_couche(half_v_b, mu_art, half_v_b, mu_vei, 0.7, mu_w, mu_a_baseline)                           
-                } else {
+            while SEUIL_DE_POIDS_CRITIQUE < photon.weight() {
+                
+                if 0. == photon.path_seg_len_in_vxl() {
+                    photon.generate_next_path_seg(skin, &mut rng);    
+                }
+                if let Some((new_dir, delta_w_coeff)) = skin.absorption(&mut photon, &mut rng) {
+                    photon.path_seg.set_dir(new_dir);
+                    
+                    let delta_w = delta_w_coeff * photon.weight();
+                    
+                    photon.decrease_weight_by(delta_w);
+                    vxls.add_at(&photon.pos, delta_w);
+                    
+                    //  if the photon weight is bellow a given critical threshold (Wc), play Roulette ! 
+                    //  The photon as 1/M chance to continue simulation, otherwise "it disappears". To
+                    //  avoid that overall energy "disappears" too, when a photon survives, its energy 
+                    //  is multiplied by M so to compensate all the other cases where energy disappears.
+                                                                    //  Roulette !  (xsi_4)
+                    if photon.weight() < SEUIL_DE_POIDS_CRITIQUE  &&  rng.random::<f64>() < M_INV {
+                        photon.scale_weight_by(M); 
+                    }
+                }
+                else {  //  ! within(vxls) 
                     break;
-                };
-
-                mu_a *= dz_scaling;     //  Conversion de mm^-1 à voxels^-1
-                let mu_t = mu_a + mu_s;
-
-                //  parcours du groupe de photon pour cette itération
-                let mut xsi_1:f64 = rng.random();
-                while xsi_1 == 0. {             //  Exclure 0 de l'interval parce que ln(0) = ∞, ou NaN.
-                    xsi_1 = rng.random();
                 }
-                //  Distance de parcours
-                prcr.len = -xsi_1.ln() / mu_t;    //  toujours positif
-
-                //  On est à la frontière (entre l'épiderme et la papille dermique) et on doit vérifier s'il y a réflexion ou transmission
-                if z <= z_epiderme  &&  z_epiderme < z + (prcr.dir.uz * prcr.len) as i32 {
-
-                    let distance_frontiere = (z_epiderme - z) as f64 / prcr.dir.uz;
-                    let distance_restante = prcr.len - distance_frontiere;
-
-                    //  le photon est rendu à la frontière 
-                    z = z_epiderme;
-                    x += (prcr.dir.ux * distance_frontiere) as i32;  
-                    y += (prcr.dir.uy * distance_frontiere) as i32;
-
-                    if hors_jeu(x, y, z) {
-                        break;
-                    }
-
-                    let mut cos_theta_i = prcr.dir.uz.abs();
-                    if 1.0 < cos_theta_i {                              //  cos_theta_i in [0., 1.] range
-                        cos_theta_i = 1.0; 
-                    }                                                   
-                    let sin_theta_i = (1. - cos_theta_i.powi(2)).sqrt();   // sin_theta_i in [0., 1.] range too.
-                    let sin_theta_t = N1_SUR_N2 * sin_theta_i;  //  Loi de Snell-Descartes
-
-                    //  Calcul de réflexion
-                    let (r, cos_theta_t)  = if sin_theta_t >= 1.0 {     //  Réflexion totale interne
-                        (1.0, f64::NAN)     //  100% réflexion, cos_theta_t non utilisé plus bas
-                    } else {
-                        let cos_theta_t = co_sin(sin_theta_t);
-                        ((N1 * cos_theta_i  -  N2 * cos_theta_t) / (N1 * cos_theta_i  +  N2 * cos_theta_t), cos_theta_t)
-                    };
-
-                    let r_square = r.powi(2);
-
-                    let delta_poids = if rng.random::<f64>() < r {   //  xsi_5 <  r : Reflexion
-                        //  Seul dir.uz est réfléchi les autres directions unitaires ne changent pas.
-                        prcr.dir.uz = - prcr.dir.uz;
-
-                        (1. - r_square) * poids
-                    } else {                        //  xsi_5 >= r : Transmission
-                        // Calcul de la nouvelle direction après réfraction
-                        prcr.dir.ux *=  N1_SUR_N2;
-                        prcr.dir.uy *=  N1_SUR_N2;
-                        prcr.dir.uz = cos_theta_t;
-
-                            r_square * poids
-                    };
-                    poids -= delta_poids;
-                    a.vxls[x as usize][z as usize] += delta_poids;
-
-                    x += (prcr.dir.ux * distance_restante) as i32;
-                    y += (prcr.dir.uy * distance_restante) as i32;
-                    z += (prcr.dir.uz * distance_restante) as i32;
-
-                    if hors_jeu(x, y, z) {
-                        break;
-                    }
-                } 
-                //  Déplacement normal, pas de frontières et réflexion de Fresnel
+            }
+            if nth_photon % 1_000 == 0 {
+                let pos = photon.pos();
+                if pos.is_within_vxls() {
+                    println!("{nth_photon}th photon : vxls[x:{}][z:{}] = {:?}", pos.x(), pos.z(), vxls.at(pos));
+                }
                 else {
-                    x += (prcr.dir.ux * prcr.len) as i32;
-                    y += (prcr.dir.uy * prcr.len) as i32;
-                    z += (prcr.dir.uz * prcr.len) as i32;
-
-                    if hors_jeu(x, y, z) {
-                        break;
-                    }
-
-                    //  Absorption
-                    let delta_poids = mu_a / mu_t * poids;
-                    poids -= delta_poids;
-                    a.vxls[x as usize][z as usize] += delta_poids;
-
-                }
-
-                let phi = 2.0 * PI * rng.random::<f64>();                                          //  xsi_2
-                let cos_phi = phi.cos();
-                let sin_phi = phi.sin();
-                                                                                                        //  xsi_3
-                let mut cos_theta = 1. / (2.* G) * (1. + g_square - ((1. - g_square)/(1. - G + 2. * G * rng.random::<f64>())).powi(2)); 
-                //  Encore une fois, pour éviter les erreurs arithmétiques flottantes (cos doit être entre -1, 1)
-                cos_theta = cos_theta.clamp(-1., 1.);
-                let sin_theta = (1. - cos_theta.powi(2)).sqrt();
-                // let theta = sin_theta.asin();
-
-                prcr.set_dir(&( if prcr.dir.uz.abs() == 1. {  // On regarde si mu_z != 1
-                    (   sin_theta * sin_phi,    //  prcr.dir.ux
-                        sin_theta * cos_phi,    //  prcr.dir.uy
-                        cos_theta,              //  prcr.dir.uz
-                    )
-                } else {
-                    let not_drctn_uz = (1. - prcr.dir.uz.powi(2)).sqrt();
-                    let drctn_uz_cos_phi = prcr.dir.uz * cos_phi;
-
-                    (   sin_theta * (prcr.dir.ux * drctn_uz_cos_phi  -  prcr.dir.uy * sin_phi) / not_drctn_uz  +  cos_theta * prcr.dir.ux,
-                        sin_theta * (prcr.dir.uy * drctn_uz_cos_phi  -  prcr.dir.ux * sin_phi) / not_drctn_uz  +  cos_theta * prcr.dir.uy,
-                        prcr.dir.uz * cos_theta  -  not_drctn_uz * sin_theta * cos_phi
-                    )
-                }));
-
-                //  Si le poids du paquet de photon soit en dessous d’un seuil critique (Wc) prédéterminé, on joue
-                //  à la roulette: Le paquet a une chance sur M de continuer à être simulé, sinon "il disparaı̂t". 
-                //  Pour éviter que de l’énergie disparaisse pris dans l'ensemble, lorsque le photon survie, 
-                //  on multiplie son énergie par M afin de compenser pour les fois ou l’énergie disparait.
-                if poids < SEUIL_DE_POIDS_CRITIQUE  &&  rng.random::<f64>() < M_INV {   //  Roulette !  (xsi_4)
-                    poids *= M; 
+                    println!("{nth_photon}th photon pos : {pos:?} out of vxls[{VXLS_X_SIZE}][{VXLS_Y_SIZE}][{VXLS_Z_SIZE}] !");
                 }
             }
-            if n_th % 5 == 0 {
-                println!("{n_th}th photon : a[x:{x}][z:{z}]{:?}", a[x as usize][z as usize]);
-            }
-
-        }
+            0
+        }).sum();
     }
 }
+
