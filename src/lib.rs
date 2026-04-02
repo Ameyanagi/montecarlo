@@ -3,25 +3,30 @@ pub mod error;
 pub use error::{Error, Result};
 
 use std::{
+    thread,
     ops::Range,
     sync::OnceLock,
     collections::HashMap,
     f64::consts::PI,
+    time::Instant,
 };
 // use tracing::debug;
-use derive_more::{Index, IndexMut};
+// use derive_more::{Index, IndexMut};
 use strum::{EnumCount};
 use rand::prelude::*;
+use ndarray::{Array2, s};
+// use ndarray::parallel::prelude::*;
+use ruviz::prelude::*;
 // use rayon::prelude::*;
 
 // use uom::si::f64::*;
 // use uom::si::{length::{millimeter, centimeter},reciprocal_length::{reciprocal_millimeter, reciprocal_centimeter}};
-
-use ruviz::prelude::*;
-
 pub fn run() -> Result<()> {
+    let available_parallelism = thread::available_parallelism()?.get();
+    dbg!(&available_parallelism);
+    
     partie_3_1();
-    partie_1_2()
+    partie_1_2(available_parallelism)
 }
 
 
@@ -29,16 +34,34 @@ fn partie_3_1() {
 
 }
 
-const NB_PHOTONS_1_2:i32 = 100_000;
+const NB_PHOTONS_1_2:usize = 100_000;
 
 const MM_PER_CM:f64 = 10.;
 const CM_PER_VXL:f64 = cm(0.001);
 const MM_PER_VXL:f64 = CM_PER_VXL * MM_PER_CM;
 const VXL_PER_MM:f64 = 1./MM_PER_VXL;
 
-const VXLS_X_SIZE:i32 = 2_000;  //  2.0 cm
-const VXLS_Y_SIZE:i32 =   800;  //  0.8 cm
-const VXLS_Z_SIZE:i32 = 1_300;  //  1.3 cm
+const INDICE_REFRAC_AIR:f64 = 1.000293; // à T.P.N. Unused, but for isometric solution.
+
+const SKIN_LAYERS: [SkinLayer; SkinLayerKind::COUNT] = [
+    SkinLayer {dz_in_mm: 0.02, indice_refrac: 1.42, v_b: 0.00, v_w: 0.05, kind: StratumCorneum},
+    SkinLayer {dz_in_mm: 0.25, indice_refrac: 1.42, v_b: 0.00, v_w: 0.20, kind: Epiderme},
+    SkinLayer {dz_in_mm: 0.10, indice_refrac: 1.39, v_b: 0.04, v_w: 0.50, kind: PapileDermique},
+    SkinLayer {dz_in_mm: 0.08, indice_refrac: 1.39, v_b: 0.30, v_w: 0.60, kind: DermeSuperieur},
+    SkinLayer {dz_in_mm: 0.20, indice_refrac: 1.39, v_b: 0.04, v_w: 0.70, kind: DermeReticulaire},
+    SkinLayer {dz_in_mm: 0.30, indice_refrac: 1.39, v_b: 0.01, v_w: 0.70, kind: DermeProfond},
+];
+const SKIN_DELTA_Z_IN_MM:f64 = SKIN_LAYERS[StratumCorneum as usize].dz_in_mm  
+    + SKIN_LAYERS[Epiderme as usize].dz_in_mm
+    + SKIN_LAYERS[PapileDermique as usize].dz_in_mm
+    + SKIN_LAYERS[DermeSuperieur as usize].dz_in_mm
+    + SKIN_LAYERS[DermeReticulaire as usize].dz_in_mm
+    + SKIN_LAYERS[DermeProfond as usize].dz_in_mm;
+
+const VXLS_X_SIZE:i32 = 800;  //  8.0 mm
+const VXLS_Y_SIZE:i32 = 800;  //  8.0 mm
+const VXLS_Z_SIZE:i32 = (SKIN_DELTA_Z_IN_MM * VXL_PER_MM) as i32;
+const VXL_XZ_DIMS:(usize, usize) = (VXLS_X_SIZE as usize, VXLS_Z_SIZE as usize);
 
 const MAGIG_NUM_0: f64 = 2.303 * 150. / 64_500. / MM_PER_CM; //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"  
 
@@ -379,6 +402,7 @@ struct Vxls {
     y_range: Range<i32>,
     z_range: Range<i32>,
 }
+
 impl Vxls {
     pub const fn new(x_size: i32, y_size: i32, z_size: i32) -> Self {
         Self {
@@ -399,69 +423,51 @@ impl Vxls {
 }
 const VXLS:Vxls = Vxls::new(VXLS_X_SIZE, VXLS_Y_SIZE, VXLS_Z_SIZE);
 
-#[derive(Index, IndexMut, Debug )]
-struct VoxelsXZ {
-    #[index]
-    #[index_mut]
-    vxls:Vec<Vec<f64>>,
-}
-impl VoxelsXZ {
-    fn new(x_size: i32, z_size: i32) -> Self {
-        Self {
-            vxls: (0..x_size).map(|_|  
-                           (0..z_size).map(|_| 0.).collect())
-                        .collect(),
-        }
-    }
-    fn add_at(&mut self, pos: &VoxelPos, delta_w: f64) {
-        self.vxls[pos.x as usize][pos.z as usize] += delta_w
-    }
-    fn at(&self, pos: &VoxelPos) -> f64 {
-        self.vxls[pos.x as usize][pos.z as usize]
-    }
-}
+fn plot(vxls:&Array2<f64>, wavelength: i32) -> Result<()> {
 
-impl NumericData2D for VoxelsXZ {
-    fn shape(&self) -> (usize, usize) {
-        (VXLS.x_range.end as usize, VXLS.z_range.end as usize)
-    }
-    fn try_collect_row_major_f64(&self) -> std::result::Result<Vec<f64>, ruviz::core::PlottingError> {
-        let mut values = Vec::with_capacity((VXLS.x_range.end * VXLS.z_range.end) as usize);
-        for row in &self.vxls {
-            //  In Voxels the y axis is displayed in revert and we want the log of the values to be heatmaped 
-            values.extend(row.into_iter().rev().map(|f| f.log10()));
-        }
-        Ok(values)
-    }
-}
-
-fn plot(vxl:&VoxelsXZ) -> Result<()> {
+    let binding = vxls.t().mapv(|x| x.log10());
+    let view = binding.slice(s![..;-1, ..]);
+       
+    let x_axis_scaling = (VXLS_X_SIZE as f64) * MM_PER_VXL;
+    let z_axis_scaling = (VXLS_Z_SIZE as f64) * MM_PER_VXL;
+    
+    let start = Instant::now();
     
     Plot::new()
-        .heatmap(vxl, Some(HeatmapConfig::new()
+        .heatmap(&view, Some(HeatmapConfig::new()
             .colorbar(true)
             .colorbar_label("Énergie absorbée")
             //  No way to scale the colorbar axis in log yet
             ))
-        .ylim(VXLS_Z_SIZE as f64 * MM_PER_VXL, 0.)    
-        .xlim( 0., VXLS_X_SIZE as f64 * MM_PER_VXL)    
-        .ylabel("Profondeur (mm)")
+        .xlim(0., x_axis_scaling)
         .xlabel("Position en x(mm)")
-        .save(".heatmap.png")?;
+        .ylim(0., z_axis_scaling)    
+        // .ylim(z_axis_scaling, 0.)    
+        .ylabel("Profondeur (mm)")
+        .save(format!(".heatmap-{wavelength}nm.png"))?;
+    
+    println!("Plot finished in {:?}", start.elapsed());
 
     Ok(())
 }
 
-
-fn partie_1_2() -> Result<()> {
-    dbg!("partie_1_2: before Voxels allocation");
+fn partie_1_2(available_parallelism: usize) -> Result<()> {
+    let chunk_size = (NB_PHOTONS_1_2 / available_parallelism) + 1;
+    dbg!(&chunk_size);
     
-    let mut a = VoxelsXZ::new(VXLS_X_SIZE, VXLS_Z_SIZE);
+    dbg!(&SKIN_DELTA_Z_IN_MM);
+
     dbg!("partie_1_2: before monte_carlo()");
-    monte_carlo(700, &mut a);
-    // dbg!(&a);
-    println!("partie_1_2: before plot()");
-    plot(&a)?;
+    let start = Instant::now();
+
+    let wavelength = 700;
+    if let Some(vxls) = monte_carlo(wavelength, chunk_size) {
+        println!("monte_carlo finished in {:?}", start.elapsed());
+
+        plot(&vxls, wavelength)?;
+    }
+    else { println!("monte_carlo finished in {:?}", start.elapsed()); }
+
     Ok(())
 }
 
@@ -482,6 +488,7 @@ enum SkinLayerKind {
     DermeProfond,
 }
 use SkinLayerKind::*;
+
 #[derive(Debug, Clone, Copy)]
 struct SkinLayer {
     kind: SkinLayerKind,
@@ -491,28 +498,20 @@ struct SkinLayer {
     v_w : f64,
 }
 
-const INDICE_REFRAC_AIR:f64 = 1.000293; // à T.P.N. Unused, but for isometric solution.
-
-const SKIN_LAYERS: [SkinLayer; SkinLayerKind::COUNT] = [
-    SkinLayer {dz_in_mm: 0.02, indice_refrac: 1.42, v_b: 0.00, v_w: 0.05, kind: StratumCorneum},
-    SkinLayer {dz_in_mm: 0.25, indice_refrac: 1.42, v_b: 0.00, v_w: 0.20, kind: Epiderme},
-    SkinLayer {dz_in_mm: 0.10, indice_refrac: 1.39, v_b: 0.04, v_w: 0.50, kind: PapileDermique},
-    SkinLayer {dz_in_mm: 0.08, indice_refrac: 1.39, v_b: 0.30, v_w: 0.60, kind: DermeSuperieur},
-    SkinLayer {dz_in_mm: 0.20, indice_refrac: 1.39, v_b: 0.04, v_w: 0.70, kind: DermeReticulaire},
-    SkinLayer {dz_in_mm: 0.30, indice_refrac: 1.39, v_b: 0.01, v_w: 0.70, kind: DermeProfond},
-];
-
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeltaWCoeff(f64);
 
 #[derive(Debug)]
 struct SkinLayerAtWl {
     layer: &'static SkinLayer,
     
-    indice_refrac_ratio: f64,
-    vxl_z_range : Range<i32>,
+    pub indice_refrac_ratio: f64,
+    pub vxl_z_range : Range<i32>,
     
-    mu_t: f64,          //  in reciprocal_vxl or vxl^-1
-    mu_a_on_mu_t: f64,
+    pub mu_t: f64,          //  in reciprocal_vxl or vxl^-1
+    pub mu_a_on_mu_t: DeltaWCoeff,
 }
+
 impl SkinLayerAtWl {
     fn kind(&self) -> SkinLayerKind {
         self.layer.kind
@@ -548,12 +547,11 @@ impl SkinLayerAtWl {
             },                    
         };
         self.mu_t = mu_a + MU_S;
-        self.mu_a_on_mu_t = mu_a / self.mu_t;
+        self.mu_a_on_mu_t = DeltaWCoeff(mu_a / self.mu_t);
     }
     
 }
 
-// static SKIN: OnceLock<Skin> = OnceLock::new();
 #[derive(Debug, )]
 struct Skin {
     g_square: f64,
@@ -587,13 +585,14 @@ impl Default for Skin {
                     vxl_z_range: dz_in_vxl_start..dz_in_vxl_acc,
                     
                     mu_t: 0.,
-                    mu_a_on_mu_t: 0.,
+                    mu_a_on_mu_t: DeltaWCoeff::default(),
                 }
             }).collect::<Vec<_>>().try_into().expect("SKIN_LAYERS [SkinLayer; SkinLayerKind::COUNT] to SkinLayerAtWl[SkinLayerAtWl; SkinLayerKind::COUNT]"),
             wavelength_i: LOWEST_WAVELENGTH,
         }
     }
 }
+
 impl Skin {
     fn try_model_at(&mut self, wavelength_i: i32) -> Option<&mut Self> {
         if let Some((val_hb_0, val_hb_1)) = hb_at_index(wavelength_i)
@@ -622,7 +621,7 @@ impl Skin {
         -xsi_1.ln() / self.skin_layer(src_skin_layer_kind).mu_t     //  in vxl
     }
     
-    fn skin_layer_kind(&self, photon_pos_z: i32) -> Option<&SkinLayerAtWl> {
+    fn try_skin_layer(&self, photon_pos_z: i32) -> Option<&SkinLayerAtWl> {
         self.layers.iter()
             .find(|skin_layer| skin_layer.vxl_z_range.contains(&photon_pos_z))
     }
@@ -656,7 +655,7 @@ impl Skin {
         }
     }
     
-    fn diff_refrac(&self, n1: f64, n2: f64, n1_on_n2: f64, dir: &UnitVec, rng: &mut ThreadRng) -> (UnitVec, f64) {
+    fn diff_refrac(&self, n1: f64, n2: f64, n1_on_n2: f64, dir: &UnitVec, rng: &mut ThreadRng) -> (UnitVec, DeltaWCoeff) {
         let cos_theta_i = dir.uz.abs().clamp(0., 1.);   //  cos_theta_i in [0., 1.] range
         let sin_theta_i = co_sin(cos_theta_i);              //  sin_theta_i in [0., 1.] range too.
         
@@ -667,39 +666,34 @@ impl Skin {
             //  rng.random::<f64>() generates a random number over 0.0..1.0, so always < 1.0 
             //  therefore if 1.0 == sin_theta_t, r= sin_theta_t is guarantied > rng.random::<f64>()
             //  without even having to call it. 
-            //  Also r_square is 1.0, and delta_weight = (1. - r_square) * weight = 0
-            (dir.uz_reflected(), 0.)
+            //  Also r_square is 1.0, and delta_w_coeff = (1. - r_square) = 0.
+            (dir.uz_reflected(), DeltaWCoeff::default())
         } else {
             let cos_theta_t = co_sin(sin_theta_t);
             let r =  (n1 * cos_theta_i  -  n2 * cos_theta_t) / (n1 * cos_theta_i  +  n2 * cos_theta_t);
             let r_square = r.powi(2);
             
             if rng.random::<f64>() < r {                   //  xsi_5 <  r  : Reflexion
-                       //  (new_dir, delta_w_coeff)
-                (dir.uz_reflected(), (1. - r_square) )
+                (dir.uz_reflected(), DeltaWCoeff(1. - r_square) )
             } else {                                    //  xsi_5 >= r  : Transmission    
                 (   UnitVec::new(
                         dir.ux * n1_on_n2,  //  dir.ux
                         dir.uy * n1_on_n2,  //  dir.uy
                         cos_theta_t,        //  dir.uz
-                    ),              r_square)
-            }                   //  delta_w_coeff
+                    ),              DeltaWCoeff(r_square))
+            }                   
         }
     }
 
-    fn absorption(&self, photon: &mut Photon, rng: &mut ThreadRng) -> Option<(UnitVec, f64)> {
+    fn absorption(&self, photon: &mut Photon, rng: &mut ThreadRng) -> Option<(UnitVec, DeltaWCoeff)> {
         // let Photon { pos, path_seg, .. } = photon; 
-        let (src_skin_layer_kind, n1) = {
-            let src_skin_layer = self.skin_layer(photon.skin_layer_kind).layer;
-            
-            (src_skin_layer.kind, src_skin_layer.indice_refrac)
-        };
+        let SkinLayer { kind:src_skin_layer_kind, indice_refrac:n1, ..} = *photon.skin_layer(self);
         let path_seg = photon.path_seg;
         let src_pos_z = photon.pos.z;
         
-        // Some(dst_skin_layer) means within voxels in z 
-        let op_dst_skin_layer = self.skin_layer_kind(src_pos_z + photon.path_seg.dz());
-        if let Some(dst_skin_layer) = op_dst_skin_layer {
+            // Some(dst_skin_layer) means within voxels in z 
+        if let Some(dst_skin_layer) = self.try_skin_layer(src_pos_z + photon.path_seg.dz()) {
+            
             let mu_a_on_mu_t = dst_skin_layer.mu_a_on_mu_t;
             let dst_skin_layer_kind = dst_skin_layer.kind();
             
@@ -708,8 +702,9 @@ impl Skin {
                 //  Stop at skin layer transition for this iteration.
                 
                 let moving_len = path_seg.new_len_in_vxl(dst_skin_layer.vxl_z_range.start - src_pos_z);
-                if photon.move_of(moving_len, path_seg.len_in_vxl() - moving_len, dst_skin_layer_kind)
-                        .is_within_xy_of_vxls() { // skin layer transition is within voxels in z 
+                //  returns photon.pos.is_within_xy_of_vxls()
+                if photon.move_of(moving_len, path_seg.len_in_vxl - moving_len, dst_skin_layer_kind) { 
+                    // skin layer transition is always within voxels in z 
                 
                     //  skin layers with different indice_refrac: the path_seg.dir will change
                     if 1.0 != dst_skin_layer.indice_refrac_ratio {
@@ -718,15 +713,15 @@ impl Skin {
                                             &photon.path_seg.dir, rng))
                     }
                     else {
-                        
                         Some((self.same_refrac(&photon.path_seg.dir, rng), mu_a_on_mu_t))
                     }
                 }
                 else { None }   //  not within voxels.
             }
             else {  //  photon stays in the same skin layer
-                if photon.move_of(path_seg.len_in_vxl(), 0., dst_skin_layer_kind)
-                        .is_within_xy_of_vxls() { // therefore photon stays within voxels in z
+                //  returns photon.pos.is_within_xy_of_vxls()
+                if photon.move_of(path_seg.len_in_vxl, 0., dst_skin_layer_kind) { 
+                    // photon is staying within voxels in z
 
                     Some((self.same_refrac(&path_seg.dir, rng), mu_a_on_mu_t))
                 }
@@ -738,28 +733,24 @@ impl Skin {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct VoxelPos {
-    x: i32,
-    y: i32,
-    z: i32,
+pub struct VoxelPos {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
 }
 impl VoxelPos {
-    fn x(&self) -> i32 {
-        self.x
-    }
-    fn z(&self) -> i32 {
-        self.z
-    }
     fn is_within_vxls(&self) -> bool {
           VXLS.x_contains(&self.x) && VXLS.y_contains(&self.y) && VXLS.z_contains(&self.z)
     }
     fn is_within_xy_of_vxls(&self) -> bool {
           VXLS.x_contains(&self.x) && VXLS.y_contains(&self.y)
     }
-    fn move_of(&mut self, delta_pos: DeltaVoxelPos) {
+    /// Adds the delta_pos to self and returns .is_within_xy_of_vxls().
+    fn move_of(&mut self, delta_pos: DeltaVoxelPos) -> bool {
         self.x += delta_pos.dx;
         self.y += delta_pos.dy;
         self.z += delta_pos.dz;
+        self.is_within_xy_of_vxls()
     }
 }
 #[derive(Debug, Clone, Copy)]
@@ -770,10 +761,10 @@ struct DeltaVoxelPos {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct UnitVec{
-    ux: f64,
-    uy: f64,
-    uz: f64,
+pub struct UnitVec{
+    pub ux: f64,
+    pub uy: f64,
+    pub uz: f64,
 }
 impl Default for UnitVec {
     fn default() -> Self {
@@ -804,26 +795,20 @@ impl UnitVec {
         }
     }
 }
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PhotonPathSeg {
-    len_in_vxl : f64,
-    dir : UnitVec,
+    delta_w : f64,
+    pub len_in_vxl : f64,
+    pub dir : UnitVec,
 }
 
 impl PhotonPathSeg {
     pub fn new(len_in_vxl: f64) -> Self {
         Self {
             len_in_vxl,
-            dir: UnitVec::default()
+            .. PhotonPathSeg::default()
         }
-    }
-    
-    fn len_in_vxl(&self) -> f64 {
-        self.len_in_vxl
-    }
-    fn set_len_in_vxl(&mut self, len_in_vxl: f64) {
-        // dbg!(&len_in_vxl);
-        self.len_in_vxl = len_in_vxl;
     }
     fn set_dir(&mut self, new_dir: UnitVec) {
         self.dir.ux = new_dir.ux;
@@ -841,13 +826,13 @@ impl PhotonPathSeg {
 struct Photon {
     // skin: &'a mut Skin,
     weight: f64,
-    pos: VoxelPos,
-    path_seg: PhotonPathSeg,
     skin_layer_kind: SkinLayerKind,
+    pub pos: VoxelPos,
+    pub path_seg: PhotonPathSeg,
 }
 
 impl Photon {
-    fn new(skin: &Skin, rng: &mut ThreadRng) -> Self {
+    pub fn new(skin: &Skin, rng: &mut ThreadRng) -> Self {
         let skin_layer_kind= StratumCorneum;
         let path_seg = PhotonPathSeg::new(skin.new_path_seg_len_in_vxl(skin_layer_kind, rng));
 
@@ -863,32 +848,40 @@ impl Photon {
         }
     }
     
-    fn weight(&self) -> f64 {
-        self.weight
+    pub fn path_seg_delta_w(&self) -> f64 {
+        self.path_seg.delta_w
     }
-    fn decrease_weight_by(&mut self, delta_w: f64)  {
-        self.weight -= delta_w;
+    pub fn adjusted_weight(&self) -> f64 {
+        self.weight - self.path_seg.delta_w
     }
-    fn scale_weight_by(&mut self, m: f64)  {
+    pub fn increase_path_seg_delta_w_by(&mut self, delta_w_coeff: DeltaWCoeff) {
+        self.path_seg.delta_w += delta_w_coeff.0 * self.adjusted_weight();
+    }
+    pub fn apply_and_reset_path_seg_delta_w(&mut self)  {
+        self.weight = self.adjusted_weight();
+        self.path_seg.delta_w = 0.;
+    }
+    pub fn scale_weight_by(&mut self, m: f64)  {
         self.weight *= m;
+        self.path_seg.delta_w *= m;
     }
 
-    fn pos(&self) -> &VoxelPos {
-        &self.pos
+    pub fn generate_next_path_seg(&mut self, skin: &Skin, rng: &mut ThreadRng) {
+        self.path_seg.len_in_vxl = skin.new_path_seg_len_in_vxl(self.skin_layer_kind, rng);
     }
-    fn path_seg_len_in_vxl(&self) -> f64 {
-        self.path_seg.len_in_vxl()
+
+    /// - Adds the delta_pos of moving_len to .pos, 
+    /// - Adjusts .skin_layer_kind and len_in_vxl to remaining_len, and 
+    /// - Returns .pos.is_within_xy_of_vxls()
+    pub fn move_of(&mut self, moving_len:f64, remaining_len: f64, skin_layer_kind: SkinLayerKind) -> bool {
+        self.path_seg.len_in_vxl = remaining_len;
+        self.skin_layer_kind = skin_layer_kind;
+        // Adds the delta_pos to .pos and returns .pos.is_within_xy_of_vxls().
+        self.pos.move_of(self.path_seg.dir.delta_pos(moving_len))
     }
     
-    fn generate_next_path_seg(&mut self, skin: &Skin, rng: &mut ThreadRng) {
-        self.path_seg.set_len_in_vxl(skin.new_path_seg_len_in_vxl(self.skin_layer_kind, rng));
-    }
-                   
-    fn move_of(&mut self, moving_len:f64, remaining_len: f64, skin_layer_kind: SkinLayerKind) -> &VoxelPos {
-        self.pos.move_of(self.path_seg.dir.delta_pos(moving_len));
-        self.path_seg.set_len_in_vxl(remaining_len);
-        self.skin_layer_kind = skin_layer_kind;
-        &self.pos
+    pub fn skin_layer(&self, skin: &Skin) -> &SkinLayer {
+        skin.skin_layer(self.skin_layer_kind).layer
     }
 }
 
@@ -897,57 +890,82 @@ fn co_sin(sin_or_cos:f64) -> f64 {
     (1. - sin_or_cos.powi(2)).sqrt()
 }
 
-
 /// wavelength in nm 
-fn monte_carlo(wavelength_i:i32, vxls:&mut VoxelsXZ) {
+fn monte_carlo(wavelength_i:i32, _chunk_size: usize) -> Option<Array2<f64>>{
     let mut skin = Skin::default();
-    if let Some(skin) = skin.try_model_at(wavelength_i) {
-        // dbg!(&skin);
+    let mut local_vxls = Array2::<f64>::zeros(VXL_XZ_DIMS);
+    skin.try_model_at(wavelength_i).map(|skin| {
+        println!("{:#?}", &skin);
         // let _:i32 = (0..NB_PHOTONS_1_2).into_par_iter().map(|nth_photon| {
-        let _:i32 = (0..NB_PHOTONS_1_2).map(|nth_photon| {
-            // Each thread gets its own thread-local RNG.
-            // This is fast and non-blocking.
-            let mut rng = rand::rng();  
-            let mut  photon = Photon::new(skin, &mut rng);
-            // if nth_photon % 1_000 == 0 { dbg!(&nth_photon, &photon); }
-            
-            while SEUIL_DE_POIDS_CRITIQUE < photon.weight() {
+        let _ =
+            (0..NB_PHOTONS_1_2)
+            // .into_par_iter()
+            //  // Chunking the simulations reduces the overhead of creating many arrays
+            // .chunks(chunk_size)
+            .map(|nth_photon| {
+                // Each thread gets a local partial grid
+                // let mut local_vxls = Array2::<f64>::zeros(VXL_XZ_DIMS);
                 
-                if 0. == photon.path_seg_len_in_vxl() {
-                    photon.generate_next_path_seg(skin, &mut rng);    
-                }
-                if let Some((new_dir, delta_w_coeff)) = skin.absorption(&mut photon, &mut rng) {
-                    photon.path_seg.set_dir(new_dir);
+                // Each thread gets its own thread-local RNG.
+                // This is fast and non-blocking.
+                let mut rng = rand::rng();  
+                
+                // for _ in chunk {
+                    let mut  photon = Photon::new(skin, &mut rng);
+                    // if nth_photon % 1_000 == 0 { dbg!(&nth_photon, &photon); }
                     
-                    let delta_w = delta_w_coeff * photon.weight();
-                    
-                    photon.decrease_weight_by(delta_w);
-                    vxls.add_at(&photon.pos, delta_w);
-                    
-                    //  if the photon weight is bellow a given critical threshold (Wc), play Roulette ! 
-                    //  The photon as 1/M chance to continue simulation, otherwise "it disappears". To
-                    //  avoid that overall energy "disappears" too, when a photon survives, its energy 
-                    //  is multiplied by M so to compensate all the other cases where energy disappears.
-                                                                    //  Roulette !  (xsi_4)
-                    if photon.weight() < SEUIL_DE_POIDS_CRITIQUE  &&  rng.random::<f64>() < M_INV {
-                        photon.scale_weight_by(M); 
+                    while SEUIL_DE_POIDS_CRITIQUE < photon.adjusted_weight() {
+                        
+                        if 0. == photon.path_seg.len_in_vxl {
+                            photon.generate_next_path_seg(skin, &mut rng);    
+                        }
+                        if let Some((new_dir, delta_w_coeff)) = skin.absorption(&mut photon, &mut rng) {
+                            photon.path_seg.set_dir(new_dir);
+                            
+                            photon.increase_path_seg_delta_w_by(delta_w_coeff);
+                            if 0. == photon.path_seg.len_in_vxl {
+                                let pos = &photon.pos;
+                                local_vxls[[pos.x as usize, pos.z as usize]] += photon.path_seg_delta_w();
+                                
+                                photon.apply_and_reset_path_seg_delta_w(); 
+                            }
+                            
+                            //  if the photon weight is bellow a given critical threshold (Wc), play Roulette ! 
+                            //  The photon as 1/M chance to continue simulation, otherwise "it disappears". To
+                            //  avoid that overall energy "disappears" too, when a photon survives, its energy 
+                            //  is multiplied by M so to compensate all the other cases where energy disappears.
+                                                                            //  Roulette !  (xsi_4)
+                            if photon.adjusted_weight() < SEUIL_DE_POIDS_CRITIQUE  &&  rng.random::<f64>() < M_INV {
+                                photon.scale_weight_by(M); 
+                            }
+                        }
+                        else {  //  ! within(vxls) 
+                            break;
+                        }
                     }
-                }
-                else {  //  ! within(vxls) 
-                    break;
-                }
-            }
-            if nth_photon % 1_000 == 0 {
-                let pos = photon.pos();
-                if pos.is_within_vxls() {
-                    println!("{nth_photon}th photon : vxls[x:{}][z:{}] = {:?}", pos.x(), pos.z(), vxls.at(pos));
-                }
-                else {
-                    println!("{nth_photon}th photon pos : {pos:?} out of vxls[{VXLS_X_SIZE}][{VXLS_Y_SIZE}][{VXLS_Z_SIZE}] !");
-                }
-            }
-            0
-        }).sum();
-    }
+                    if nth_photon % 1_000 == 0 {
+                        let pos = &photon.pos;
+                        if pos.is_within_vxls() {
+                            println!("{nth_photon}th photon : vxls[x:{}][z:{}] = {:?}", pos.x, pos.z, local_vxls[[pos.x as usize, pos.z as usize]]);
+                        }
+                        else {
+                            println!("{nth_photon}th photon pos : {pos:?} out of vxls[{VXLS_X_SIZE}][{VXLS_Y_SIZE}][{VXLS_Z_SIZE}] !");
+                        }
+                    }
+                // }
+                // local_vxls
+                0
+            })
+            .sum::<i32>();
+            local_vxls
+            
+            // .reduce(|| Array2::<f64>::zeros(VXL_XZ_DIMS), 
+            //     |mut total, local| {
+            //         total += &local; 
+            //         total
+            //     },
+            // )
+            
+    })
 }
 

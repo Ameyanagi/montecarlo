@@ -5,10 +5,12 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.0", features = ["derive"] }
-derive_more = { version = "2.1.1", features = ["from", "display", "index", "index_mut"] }
+# derive_more = { version = "2.1.1", features = ["from", "display", "index", "index_mut"] }
+ndarray = { version = "0.17.2", features = ["rayon"] }
 rand = { version = "0.10.0", features = ["thread_rng"] }
 rayon = "1.11.0"
-ruviz = { version = "0.1.5", features = ["typst-math"] }
+ruviz = { version = "0.3.3", features = ["ndarray_support", "parallel", "simd"] }
 strum = { version = "0.28.0", features = ["derive"] }
 tracing = "0.1.44"
 uom = "0.38.0"
+
