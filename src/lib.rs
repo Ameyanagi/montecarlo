@@ -34,7 +34,7 @@ fn partie_3_1() {
 
 }
 
-const NB_PHOTONS_1_2:usize = 100_000;
+const NB_PHOTONS_1_2:usize = 1_000_000;
 
 const MM_PER_CM:f64 = 10.;
 const CM_PER_VXL:f64 = cm(0.001);
@@ -423,14 +423,15 @@ impl Vxls {
 }
 const VXLS:Vxls = Vxls::new(VXLS_X_SIZE, VXLS_Y_SIZE, VXLS_Z_SIZE);
 
-fn plot(vxls:&Array2<f64>, wavelength: i32) -> Result<()> {
+fn plot(vxls:&mut Array2<f64>, wavelength: i32, k_photon: usize) -> Result<()> {
 
-    let binding = vxls.t().mapv(|x| x.log10());
+    vxls.par_mapv_inplace(f64::log10);
+    let binding = vxls.t();
     let view = binding.slice(s![..;-1, ..]);
        
     let x_axis_scaling = (VXLS_X_SIZE as f64) * MM_PER_VXL;
     let z_axis_scaling = (VXLS_Z_SIZE as f64) * MM_PER_VXL;
-    
+        
     let start = Instant::now();
     
     Plot::new()
@@ -444,7 +445,8 @@ fn plot(vxls:&Array2<f64>, wavelength: i32) -> Result<()> {
         .ylim(0., z_axis_scaling)    
         // .ylim(z_axis_scaling, 0.)    
         .ylabel("Profondeur (mm)")
-        .save(format!(".heatmap-{wavelength}nm.png"))?;
+        .title(format!("{k_photon}k photon at {wavelength}nm"))
+        .save(format!(".heatmap-{wavelength}nm{k_photon}kphoton.png"))?;
     
     println!("Plot finished in {:?}", start.elapsed());
 
@@ -461,12 +463,15 @@ fn partie_1_2(available_parallelism: usize) -> Result<()> {
     let start = Instant::now();
 
     let wavelength = 700;
-    if let Some(vxls) = monte_carlo(wavelength, chunk_size) {
-        println!("monte_carlo finished in {:?}", start.elapsed());
+    let k_photon = NB_PHOTONS_1_2/1_000;
+    if let Some(mut vxls) = monte_carlo(wavelength, chunk_size) {
+        println!("monte_carlo of {k_photon}k photon at {wavelength}nm finished in {:?}", start.elapsed());
 
-        plot(&vxls, wavelength)?;
+        plot(&mut vxls, wavelength, k_photon)?;
     }
-    else { println!("monte_carlo finished in {:?}", start.elapsed()); }
+    else { 
+        println!("monte_carlo of {k_photon}k photon at {wavelength}nm finished in {:?}", start.elapsed()); 
+    }
 
     Ok(())
 }
