@@ -1,4 +1,3 @@
-
 pub mod error;
 pub use error::{Error, Result};
 
@@ -28,14 +27,13 @@ const NB_PHOTONS_1_2: usize = 1_000_000;
 
 const MM_PER_CM: f64 = 10.;
 const UM_PER_VXL: u16 = 10;
-const MM_PER_VXL: f64 = UM_PER_VXL as f64 /1_000.;
+const MM_PER_VXL: f64 = UM_PER_VXL as f64 / 1_000.;
 
 const LOWEST_WAVELENGTH: u16 = 600; // nanometer
 
 const INDICE_REFRAC_AIR: f64 = 1.000_293; // à T.P.N. Unused, but for isometric solution.
 
-
-#[rustfmt::skip]    
+#[rustfmt::skip]
 const SKIN_LAYERS: [SkinLayer; SkinLayerKind::COUNT] = [
     SkinLayer { dz_in_um:  20, indice_refrac: 1.42, v_b: 0.00, v_w: 0.05, kind: StratumCorneum },
     SkinLayer { dz_in_um: 250, indice_refrac: 1.42, v_b: 0.00, v_w: 0.20, kind: Epiderme },
@@ -44,7 +42,6 @@ const SKIN_LAYERS: [SkinLayer; SkinLayerKind::COUNT] = [
     SkinLayer { dz_in_um: 200, indice_refrac: 1.39, v_b: 0.04, v_w: 0.70, kind: DermeReticulaire },
     SkinLayer { dz_in_um: 300, indice_refrac: 1.39, v_b: 0.01, v_w: 0.70, kind: DermeProfond },
 ];
-
 
 const SKIN_DELTA_Z_IN_UM: u16 = SKIN_LAYERS[StratumCorneum as usize].dz_in_um
     + SKIN_LAYERS[Epiderme as usize].dz_in_um
@@ -283,9 +280,11 @@ const HB_ARRAY: [(f64, f64); HB_SIZE as usize] = [
 ];
 
 fn hb_for_wavelength(wavelength_u: u16) -> Option<(f64, f64)> {
-    if (LOWEST_WAVELENGTH..LOWEST_WAVELENGTH+HB_SIZE*2).contains(&wavelength_u) && wavelength_u.is_multiple_of(2) {
-        Some(HB_ARRAY[usize::from((wavelength_u - LOWEST_WAVELENGTH) / 2)]) 
-    } else { None }
+    if (LOWEST_WAVELENGTH..LOWEST_WAVELENGTH + HB_SIZE * 2).contains(&wavelength_u) && wavelength_u.is_multiple_of(2) {
+        Some(HB_ARRAY[usize::from((wavelength_u - LOWEST_WAVELENGTH) / 2)])
+    } else {
+        None
+    }
 }
 static WATER_HASHMAP: OnceLock<HashMap<u16, f64>> = OnceLock::new();
 
@@ -408,7 +407,11 @@ struct VxlRanges {
 
 impl VxlRanges {
     pub const fn new(x_size: i32, y_size: i32, z_size: i32) -> Self {
-        Self { x: 0..x_size, y: 0..y_size, z: 0..z_size }
+        Self {
+            x: 0..x_size,
+            y: 0..y_size,
+            z: 0..z_size,
+        }
     }
     fn x_contains(&self, x: i32) -> bool {
         self.x.contains(&x)
@@ -465,8 +468,11 @@ fn partie_1_2(available_parallelism: usize) -> Result<()> {
     let k_photon = NB_PHOTONS_1_2 / 1_000;
 
     let op_vxls = monte_carlo(wavelength_u, chunk_size);
-    println!("monte_carlo of {k_photon}k photon at {wavelength_u}nm finished in {:?}", start.elapsed());
-    
+    println!(
+        "monte_carlo of {k_photon}k photon at {wavelength_u}nm finished in {:?}",
+        start.elapsed()
+    );
+
     if let Some(mut vxls) = op_vxls {
         plot(&mut vxls, wavelength_u, k_photon)?;
     }
@@ -540,8 +546,10 @@ impl SkinLayerAtWl {
 
         let mu_a = MM_PER_VXL
             * match kind {
-                StratumCorneum | Epiderme => (1. - (V_MEL + v_w))
-                    .mul_add(mu_a_baseline, V_MEL.mul_add(6.6e+10 * wavelength.powf(-3.33) / MM_PER_CM, v_w * mu_w)),
+                StratumCorneum | Epiderme => (1. - (V_MEL + v_w)).mul_add(
+                    mu_a_baseline,
+                    V_MEL.mul_add(6.6e+10 * wavelength.powf(-3.33) / MM_PER_CM, v_w * mu_w),
+                ),
                 _ => {
                     //  Tout sous l'Epiderme
                     let v_a = v_b / 2.; //  split 50-50 with v_v
@@ -559,7 +567,6 @@ struct Skin {
     layers: [SkinLayerAtWl; SkinLayerKind::COUNT],
     wavelength_u: u16,
 }
-
 
 impl Default for Skin {
     fn default() -> Self {
@@ -625,21 +632,27 @@ impl Skin {
     }
 
     fn try_skin_layer(&self, photon_pos_z: i32) -> Option<&SkinLayerAtWl> {
-        self.layers.iter().find(|skin_layer| skin_layer.vxl_z_range.contains(&photon_pos_z))
+        self.layers
+            .iter()
+            .find(|skin_layer| skin_layer.vxl_z_range.contains(&photon_pos_z))
     }
 
     fn absorption(&self, photon: &mut Photon, rng: &mut ThreadRng) -> Option<(UnitVec, DeltaWCoeff)> {
         // let Photon { pos, path_seg, .. } = photon;
-        let SkinLayer { kind: src_skin_layer_kind, indice_refrac: n1, .. } = *photon.skin_layer(self);
+        let SkinLayer {
+            kind: src_skin_layer_kind,
+            indice_refrac: n1,
+            ..
+        } = *photon.skin_layer(self);
         let path_seg = photon.path_seg;
         let src_pos_z = photon.pos.z;
 
-        // With `len_in_vxl: f64` possibly extremeny large, `photon.path_seg.dz()` conversion 
+        // With `len_in_vxl: f64` possibly extremeny large, `photon.path_seg.dz()` conversion
         // to `i32` may resut in `i32::MIN` or `i32:MAX`. We insure the addition here doesn't
         // panic (or wrap-around in `release` mode) by using `i32::saturating_add_signed()`.
         if let Some(dst_skin_layer) = self.try_skin_layer(src_pos_z.saturating_add(photon.path_seg.dz())) {
             // Some(dst_skin_layer) means within voxels in z
-            
+
             let mu_a_on_mu_t = dst_skin_layer.mu_a_on_mu_t;
             let dst_skin_layer_kind = dst_skin_layer.kind();
 
@@ -691,31 +704,30 @@ pub struct VoxelPos {
     z: i32,
 }
 impl VoxelPos {
-    
-    ///  Validated never negative by `skin.try_skin_layer()` at all times, so usize conversion is always valid. 
+    ///  Validated never negative by `skin.try_skin_layer()` at all times, so usize conversion is always valid.
     const fn x(&self) -> usize {
         #![allow(clippy::cast_sign_loss)]
         self.x as usize
     }
-    
-    ///  Validated never negative  by `is_within_xy_of_vxls()` at all times, so usize conversion is always valid. 
+
+    ///  Validated never negative  by `is_within_xy_of_vxls()` at all times, so usize conversion is always valid.
     const fn z(&self) -> usize {
         #![allow(clippy::cast_sign_loss)]
         self.z as usize
     }
-    
+
     fn is_within_vxls(&self) -> bool {
         VXL_RANGES.x_contains(self.x) && VXL_RANGES.y_contains(self.y) && VXL_RANGES.z_contains(self.z)
     }
-    
+
     fn is_within_xy_of_vxls(&self) -> bool {
         VXL_RANGES.x_contains(self.x) && VXL_RANGES.y_contains(self.y)
     }
 
     /// Adds the `delta_pos` to `self` and returns .`is_within_xy_of_vxls()`.
     ///
-    /// Since it is likely that `dx`, `dy` and or `dz` ends up being `i32::MIN` or `i32:MAX`, 
-    /// on overflow by `f64` conversion to `i32`, it's important to prevent panic (or worst: silent 
+    /// Since it is likely that `dx`, `dy` and or `dz` ends up being `i32::MIN` or `i32:MAX`,
+    /// on overflow by `f64` conversion to `i32`, it's important to prevent panic (or worst: silent
     /// wrap-around in release mode). So, we cap the `x`, `y`, `z` values to `i32::MIN` and `i32:MAX`
     /// by using `i32::saturating_add_signed()`.
     ///
@@ -751,21 +763,29 @@ impl UnitVec {
         Self { ux, uy, uz }
     }
 
-    /// Returns `f64` based `[ux, uy, uz] * len` converted to `i32` based `[dx, dy, dz]`. 
-    /// Since we *know* that 'len' can be extremely big (ln(0) = ∞, we prevent `0.` but not 
-    /// `f64::EPSILON`) it is entirely likely that some returned `dx`, `dy` and or `dz` ends 
+    /// Returns `f64` based `[ux, uy, uz] * len` converted to `i32` based `[dx, dy, dz]`.
+    /// Since we *know* that 'len' can be extremely big (ln(0) = ∞, we prevent `0.` but not
+    /// `f64::EPSILON`) it is entirely likely that some returned `dx`, `dy` and or `dz` ends
     /// up being `i32::MIN` or `i32:MAX` on overflow by `f64` conversion to `i32`.
     fn delta_pos(&self, len: f64) -> DeltaVoxelPos {
         //  As `i32` returns `i32:MIN` or `i32::MAX` on overflow by `f64`conversion, which
         // //  will definitely ultimately result in `pos.is_within_xy_of_vxls()` failting.
         #[allow(clippy::cast_possible_truncation)]
-        DeltaVoxelPos { dx: (self.ux * len) as i32, dy: (self.uy * len) as i32, dz: (self.uz * len) as i32 }
+        DeltaVoxelPos {
+            dx: (self.ux * len) as i32,
+            dy: (self.uy * len) as i32,
+            dz: (self.uz * len) as i32,
+        }
     }
     fn uz_reflected(&self) -> Self {
         //  Only .uz is reflected the other unitary element ux and uy stay the same.
-        Self { ux: self.ux, uy: self.uy, uz: -self.uz }
+        Self {
+            ux: self.ux,
+            uy: self.uy,
+            uz: -self.uz,
+        }
     }
-    
+
     fn same_refrac(&self, rng: &mut ThreadRng) -> Self {
         // xsi_2
         let phi = 2.0 * PI * rng.random::<f64>();
@@ -774,15 +794,17 @@ impl UnitVec {
 
         //  xsi_3
         let mut cos_theta = 1. / (2. * G)
-            * ((1. - G_SQUARE) / (2. * G).mul_add(rng.random::<f64>(), 1. - G))
-                .mul_add(-((1. - G_SQUARE) / (2. * G).mul_add(rng.random::<f64>(), 1. - G)), 1. + G_SQUARE);
+            * ((1. - G_SQUARE) / (2. * G).mul_add(rng.random::<f64>(), 1. - G)).mul_add(
+                -((1. - G_SQUARE) / (2. * G).mul_add(rng.random::<f64>(), 1. - G)),
+                1. + G_SQUARE,
+            );
         //  Ici aussi, pour éviter les erreurs arithmétiques flottantes cos doit être entre (-1, 1)
         cos_theta = cos_theta.clamp(-1., 1.);
         let sin_theta = co_sin(cos_theta);
 
         //  We know this is likely because of `common `default() intitialisation case.
         #[allow(clippy::float_cmp)]
-        if 1. == self.uz.abs()  {
+        if 1. == self.uz.abs() {
             Self::new(
                 sin_theta * sin_phi, //  self.ux
                 sin_theta * cos_phi, //  self.uy
@@ -836,7 +858,6 @@ impl UnitVec {
             }
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -849,20 +870,23 @@ pub struct PhotonPathSeg {
 impl PhotonPathSeg {
     #[must_use]
     pub fn new(len_in_vxl: f64) -> Self {
-        Self { len_in_vxl, ..Self::default() }
+        Self {
+            len_in_vxl,
+            ..Self::default()
+        }
     }
     const fn set_dir(&mut self, new_dir: UnitVec) {
         self.dir.ux = new_dir.ux;
         self.dir.uy = new_dir.uy;
         self.dir.uz = new_dir.uz;
     }
-    /// Returns `f64` based `dir.uz * len_in_vxl` converted to `i32` based `dz`. 
-    /// Since we *know* that `len_in_vxl` can be extremely big (ln(0) = ∞, we prevent `0.` but not 
-    /// `f64::EPSILON`) it is entirely likely that some returned `dx`, `dy` and or `dz` ends up being 
+    /// Returns `f64` based `dir.uz * len_in_vxl` converted to `i32` based `dz`.
+    /// Since we *know* that `len_in_vxl` can be extremely big (ln(0) = ∞, we prevent `0.` but not
+    /// `f64::EPSILON`) it is entirely likely that some returned `dx`, `dy` and or `dz` ends up being
     /// `i32::MIN` or `i32:MAX` on overflow by `f64` conversion to `i32`.
     fn dz(&self) -> i32 {
         #![allow(clippy::cast_possible_truncation)]
-        
+
         //  as i32 returns i32:MAX or i32::MIN on overflow by f64,
         //  which will definitely result in `skin.try_skin_layer()` to return `None`.
         (self.len_in_vxl * self.dir.uz) as i32
@@ -885,7 +909,16 @@ impl Photon {
         let skin_layer_kind = StratumCorneum;
         let path_seg = PhotonPathSeg::new(skin.new_path_seg_len_in_vxl(skin_layer_kind, rng));
 
-        Self { weight: 1.0, pos: VoxelPos { x: VXLS_X_SIZE / 2, y: VXLS_Y_SIZE / 2, z: 0 }, path_seg, skin_layer_kind }
+        Self {
+            weight: 1.0,
+            pos: VoxelPos {
+                x: VXLS_X_SIZE / 2,
+                y: VXLS_Y_SIZE / 2,
+                z: 0,
+            },
+            path_seg,
+            skin_layer_kind,
+        }
     }
 
     pub const fn path_seg_delta_w(&self) -> f64 {
@@ -964,7 +997,7 @@ fn monte_carlo(wavelength_u: u16, _chunk_size: usize) -> Option<Array2<f64>> {
 
                             photon.increase_path_seg_delta_w_by(delta_w_coeff);
                             if 0. == photon.path_seg.len_in_vxl {
-                                let pos = &photon.pos;  
+                                let pos = &photon.pos;
                                 local_vxls[[pos.x(), pos.z()]] += photon.path_seg_delta_w();
 
                                 photon.apply_and_reset_path_seg_delta_w();
