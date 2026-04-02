@@ -30,7 +30,7 @@ pub fn run() -> Result<()> {
 }
 
 
-fn partie_3_1() {
+const fn partie_3_1() {
 
 }
 
@@ -286,7 +286,7 @@ const HB_ARRAY : [(f64, f64); HB_SIZE] = [
     (1024.0, 206.784)
 ];
 
-fn hb_at_index(key: i32) -> Option<(f64, f64)> {
+const fn hb_at_index(key: i32) -> Option<(f64, f64)> {
     let i = (key-600)/2;
     if 0<= i && i < (HB_SIZE as i32) { Some(HB_ARRAY[i as usize]) } else { None }
 }
@@ -429,8 +429,8 @@ fn plot(vxls:&mut Array2<f64>, wavelength: i32, k_photon: usize) -> Result<()> {
     let binding = vxls.t();
     let view = binding.slice(s![..;-1, ..]);
        
-    let x_axis_scaling = (VXLS_X_SIZE as f64) * MM_PER_VXL;
-    let z_axis_scaling = (VXLS_Z_SIZE as f64) * MM_PER_VXL;
+    let x_axis_scaling = f64::from(VXLS_X_SIZE) * MM_PER_VXL;
+    let z_axis_scaling = f64::from(VXLS_Z_SIZE) * MM_PER_VXL;
         
     let start = Instant::now();
     
@@ -492,7 +492,7 @@ enum SkinLayerKind {
     DermeReticulaire,
     DermeProfond,
 }
-use SkinLayerKind::*;
+use SkinLayerKind::{StratumCorneum, Epiderme, PapileDermique, DermeSuperieur, DermeReticulaire, DermeProfond};
 
 #[derive(Debug, Clone, Copy)]
 struct SkinLayer {
@@ -518,11 +518,11 @@ struct SkinLayerAtWl {
 }
 
 impl SkinLayerAtWl {
-    fn kind(&self) -> SkinLayerKind {
+    const fn kind(&self) -> SkinLayerKind {
         self.layer.kind
     }
 
-    fn indice_refrac(&self) -> f64 {
+    const fn indice_refrac(&self) -> f64 {
         self.layer.indice_refrac
     }
     
@@ -537,18 +537,18 @@ impl SkinLayerAtWl {
 
         //  Coeff artere & veine
         let (mu_art, mu_vei) = (
-            SA_O2 * mu_absorption_oxyhemoglobine + (1. - SA_O2) * mu_a_hemoglobine,
-            SV_O2 * mu_absorption_oxyhemoglobine + (1. - SV_O2) * mu_a_hemoglobine );
+            SA_O2.mul_add(mu_absorption_oxyhemoglobine, (1. - SA_O2) * mu_a_hemoglobine),
+            SV_O2.mul_add(mu_absorption_oxyhemoglobine, (1. - SV_O2) * mu_a_hemoglobine) );
 
         let SkinLayer { kind, v_w, v_b, .. } = *self.layer;
         
         let mu_a = MM_PER_VXL * match kind {
             StratumCorneum | Epiderme =>  
-                V_MEL * (6.6e+10 * wavelength.powf(-3.33) / MM_PER_CM)  +  v_w * mu_w  +  (1. - (V_MEL + v_w)) * mu_a_baseline,
+                (1. - (V_MEL + v_w)).mul_add(mu_a_baseline, V_MEL.mul_add(6.6e+10 * wavelength.powf(-3.33) / MM_PER_CM, v_w * mu_w)),
             _ => {  //  Tout sous l'Epiderme
                 let v_a = v_b / 2.;     //  split 50-50 with v_v
                 let v_v = v_a;          //  split 50-50 with v_a
-                v_a * mu_art  +  v_v * mu_vei  +  v_w * mu_w  +  (1.- (v_a + v_v + v_w)) * mu_a_baseline
+                (1. - (v_a + v_v + v_w)).mul_add(mu_a_baseline, v_w.mul_add(mu_w, v_a * mu_art + v_v * mu_vei))
             },                    
         };
         self.mu_t = mu_a + MU_S;
@@ -603,9 +603,9 @@ impl Skin {
         if let Some((val_hb_0, val_hb_1)) = hb_at_index(wavelength_i)
         && let Some(val_water) = water_hashmap(wavelength_i) {
             
-            let wavelength = wavelength_i as f64;
+            let wavelength = f64::from(wavelength_i);
             
-            for skin_layer_at_wl in self.layers.iter_mut() {
+            for skin_layer_at_wl in &mut self.layers {
                 skin_layer_at_wl.model_at(wavelength, val_hb_0, val_hb_1, val_water);
             }
             self.wavelength_i = wavelength_i;
@@ -613,7 +613,7 @@ impl Skin {
         } else { None }
     }
     
-    fn skin_layer(&self, skin_layer_kind: SkinLayerKind) -> &SkinLayerAtWl {
+    const fn skin_layer(&self, skin_layer_kind: SkinLayerKind) -> &SkinLayerAtWl {
         &self.layers[skin_layer_kind as usize]
     }
     fn new_path_seg_len_in_vxl(&self, src_skin_layer_kind: SkinLayerKind, rng: &mut ThreadRng) -> f64 {
@@ -638,7 +638,7 @@ impl Skin {
         let sin_phi = phi.sin();
         
         //  xsi_3
-        let mut cos_theta = 1. / (2.* G) * (1. + self.g_square - ((1. - self.g_square)/(1. - G + 2. * G * rng.random::<f64>())).powi(2)); 
+        let mut cos_theta = 1. / (2.* G) * ((1. - self.g_square) / (2. * G).mul_add(rng.random::<f64>(), 1. - G)).mul_add(-((1. - self.g_square) / (2. * G).mul_add(rng.random::<f64>(), 1. - G)), 1. + self.g_square); 
         //  Ici aussi, pour éviter les erreurs arithmétiques flottantes cos doit être entre (-1, 1)
         cos_theta = cos_theta.clamp(-1., 1.);
         let sin_theta = co_sin(cos_theta);
@@ -653,9 +653,9 @@ impl Skin {
             let not_uz = co_sin(dir.uz);
             let uz_cos_phi = dir.uz * cos_phi;
             UnitVec::new(   
-                sin_theta * (dir.ux * uz_cos_phi  -  dir.uy * sin_phi) / not_uz  +  cos_theta * dir.ux,
-                sin_theta * (dir.uy * uz_cos_phi  -  dir.ux * sin_phi) / not_uz  +  cos_theta * dir.uy,
-                dir.uz * cos_theta  -  not_uz * sin_theta * cos_phi
+                sin_theta * dir.ux.mul_add(uz_cos_phi, -(dir.uy * sin_phi)) / not_uz  +  cos_theta * dir.ux,
+                sin_theta * dir.uy.mul_add(uz_cos_phi, -(dir.ux * sin_phi)) / not_uz  +  cos_theta * dir.uy,
+                dir.uz.mul_add(cos_theta, -(not_uz * sin_theta * cos_phi))
             )
         }
     }
@@ -675,7 +675,7 @@ impl Skin {
             (dir.uz_reflected(), DeltaWCoeff::default())
         } else {
             let cos_theta_t = co_sin(sin_theta_t);
-            let r =  (n1 * cos_theta_i  -  n2 * cos_theta_t) / (n1 * cos_theta_i  +  n2 * cos_theta_t);
+            let r =  n1.mul_add(cos_theta_i, -(n2 * cos_theta_t)) / n1.mul_add(cos_theta_i, n2 * cos_theta_t);
             let r_square = r.powi(2);
             
             if rng.random::<f64>() < r {                   //  xsi_5 <  r  : Reflexion
@@ -703,7 +703,15 @@ impl Skin {
             let dst_skin_layer_kind = dst_skin_layer.kind();
             
             //  Trans skin layers 
-            if src_skin_layer_kind != dst_skin_layer_kind {
+            if src_skin_layer_kind == dst_skin_layer_kind {  //  photon stays in the same skin layer
+                //  returns photon.pos.is_within_xy_of_vxls()
+                if photon.move_of(path_seg.len_in_vxl, 0., dst_skin_layer_kind) { 
+                    // photon is staying within voxels in z
+
+                    Some((self.same_refrac(&path_seg.dir, rng), mu_a_on_mu_t))
+                }
+                else { None }   //  not within voxels.
+            } else {
                 //  Stop at skin layer transition for this iteration.
                 
                 let moving_len = path_seg.new_len_in_vxl(dst_skin_layer.vxl_z_range.start - src_pos_z);
@@ -712,23 +720,13 @@ impl Skin {
                     // skin layer transition is always within voxels in z 
                 
                     //  skin layers with different indice_refrac: the path_seg.dir will change
-                    if 1.0 != dst_skin_layer.indice_refrac_ratio {
+                    if 1.0 == dst_skin_layer.indice_refrac_ratio {
+                        Some((self.same_refrac(&photon.path_seg.dir, rng), mu_a_on_mu_t))
+                    } else {
                         Some(self.diff_refrac(n1, dst_skin_layer.indice_refrac(), 
                                             dst_skin_layer.indice_refrac_ratio, 
                                             &photon.path_seg.dir, rng))
                     }
-                    else {
-                        Some((self.same_refrac(&photon.path_seg.dir, rng), mu_a_on_mu_t))
-                    }
-                }
-                else { None }   //  not within voxels.
-            }
-            else {  //  photon stays in the same skin layer
-                //  returns photon.pos.is_within_xy_of_vxls()
-                if photon.move_of(path_seg.len_in_vxl, 0., dst_skin_layer_kind) { 
-                    // photon is staying within voxels in z
-
-                    Some((self.same_refrac(&path_seg.dir, rng), mu_a_on_mu_t))
                 }
                 else { None }   //  not within voxels.
             }
@@ -750,7 +748,7 @@ impl VoxelPos {
     fn is_within_xy_of_vxls(&self) -> bool {
           VXLS.x_contains(&self.x) && VXLS.y_contains(&self.y)
     }
-    /// Adds the delta_pos to self and returns .is_within_xy_of_vxls().
+    /// Adds the `delta_pos` to self and returns .`is_within_xy_of_vxls()`.
     fn move_of(&mut self, delta_pos: DeltaVoxelPos) -> bool {
         self.x += delta_pos.dx;
         self.y += delta_pos.dy;
@@ -778,7 +776,7 @@ impl Default for UnitVec {
 }
 
 impl UnitVec {
-    fn new(ux: f64, uy: f64, uz: f64) -> Self {
+    const fn new(ux: f64, uy: f64, uz: f64) -> Self {
         Self {ux, uy, uz}
     }
     
@@ -809,13 +807,14 @@ pub struct PhotonPathSeg {
 }
 
 impl PhotonPathSeg {
+    #[must_use] 
     pub fn new(len_in_vxl: f64) -> Self {
         Self {
             len_in_vxl,
-            .. PhotonPathSeg::default()
+            .. Self::default()
         }
     }
-    fn set_dir(&mut self, new_dir: UnitVec) {
+    const fn set_dir(&mut self, new_dir: UnitVec) {
         self.dir.ux = new_dir.ux;
         self.dir.uy = new_dir.uy;
         self.dir.uz = new_dir.uz;
@@ -824,7 +823,7 @@ impl PhotonPathSeg {
         (self.len_in_vxl * self.dir.uz) as i32
     }
     fn new_len_in_vxl(&self, dz: i32) -> f64 {
-        dz as f64 / self.dir.uz
+        f64::from(dz) / self.dir.uz
     }
 }
 #[derive(Debug)]
@@ -853,7 +852,7 @@ impl Photon {
         }
     }
     
-    pub fn path_seg_delta_w(&self) -> f64 {
+    pub const fn path_seg_delta_w(&self) -> f64 {
         self.path_seg.delta_w
     }
     pub fn adjusted_weight(&self) -> f64 {
@@ -875,9 +874,9 @@ impl Photon {
         self.path_seg.len_in_vxl = skin.new_path_seg_len_in_vxl(self.skin_layer_kind, rng);
     }
 
-    /// - Adds the delta_pos of moving_len to .pos, 
-    /// - Adjusts .skin_layer_kind and len_in_vxl to remaining_len, and 
-    /// - Returns .pos.is_within_xy_of_vxls()
+    /// - Adds the `delta_pos` of `moving_len` to .pos, 
+    /// - Adjusts .`skin_layer_kind` and `len_in_vxl` to `remaining_len`, and 
+    /// - Returns .`pos.is_within_xy_of_vxls()`
     pub fn move_of(&mut self, moving_len:f64, remaining_len: f64, skin_layer_kind: SkinLayerKind) -> bool {
         self.path_seg.len_in_vxl = remaining_len;
         self.skin_layer_kind = skin_layer_kind;
@@ -885,14 +884,14 @@ impl Photon {
         self.pos.move_of(self.path_seg.dir.delta_pos(moving_len))
     }
     
-    pub fn skin_layer(&self, skin: &Skin) -> &SkinLayer {
+    pub const fn skin_layer(&self, skin: &Skin) -> &SkinLayer {
         skin.skin_layer(self.skin_layer_kind).layer
     }
 }
 
 /// Return sin if cos and cos if sin
 fn co_sin(sin_or_cos:f64) -> f64 {
-    (1. - sin_or_cos.powi(2)).sqrt()
+    sin_or_cos.mul_add(-sin_or_cos, 1.).sqrt()
 }
 
 /// wavelength in nm 
