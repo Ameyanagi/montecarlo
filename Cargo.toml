@@ -18,3 +18,4 @@ uom = "0.38.0"
 pedantic    = { level = "deny", priority = -1 }
 nursery     = { level = "deny", priority = -1 }
 unwrap_used = "deny"
+missing_errors_doc = "allow"
