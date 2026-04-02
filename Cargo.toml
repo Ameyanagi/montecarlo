@@ -14,3 +14,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 tracing = "0.1.44"
 uom = "0.38.0"
 
+[lints.clippy]
+pedantic    = { level = "deny", priority = -1 }
+nursery     = { level = "deny", priority = -1 }
+unwrap_used = "deny"
