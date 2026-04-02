@@ -1,9 +1,8 @@
+pub use montecarlo::{
+    error::{Error, Result},
+    run,
+};
 
-
-pub use montecarlo::{error::{Error, Result}, run};
-
-
-fn main() -> Result<()>{
-
+fn main() -> Result<()> {
     run()
 }

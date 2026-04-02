@@ -1,5 +1,4 @@
-
-pub type Result<T> = core::result::Result<T,Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 pub type Error = Box<dyn std::error::Error>;
 
 // use derive_more::{ From };
@@ -13,7 +12,6 @@ pub type Error = Box<dyn std::error::Error>;
 //     #[from]
 //     Plotting(ruviz::core::PlottingError),     //  as example
 // }
-
 
 // // region:      --- Custom
 
@@ -30,7 +28,6 @@ pub type Error = Box<dyn std::error::Error>;
 // }
 
 // // endregion:   --- Custom
-
 
 // // region:      --- Error Boilerplate
 
