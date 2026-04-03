@@ -4,26 +4,22 @@ pub use error::{Error, Result};
 use std::{collections::HashMap, f64::consts::PI, ops::Range, sync::OnceLock, thread, time::Instant};
 // use tracing::debug;
 // use derive_more::{Index, IndexMut};
+use ndarray::parallel::prelude::*;
 use ndarray::{Array2, s};
 use rand::prelude::*;
-use strum::EnumCount;
-// use ndarray::parallel::prelude::*;
 use ruviz::prelude::*;
-// use rayon::prelude::*;
+use strum::EnumCount;
 
 // use uom::si::f64::*;
 // use uom::si::{length::{millimeter, centimeter},reciprocal_length::{reciprocal_millimeter, reciprocal_centimeter}};
-pub fn run() -> Result<()> {
+pub fn run(k_photon: u16, wavelenght: u16, verbose: bool) -> Result<()> {
     let available_parallelism = thread::available_parallelism()?.get();
-    dbg!(&available_parallelism);
 
     partie_3_1();
-    partie_1_2(available_parallelism)
+    partie_1_2(k_photon, wavelenght, available_parallelism, verbose)
 }
 
 const fn partie_3_1() {}
-
-const NB_PHOTONS_1_2: usize = 1_000_000;
 
 const MM_PER_CM: f64 = 10.;
 const UM_PER_VXL: u16 = 10;
@@ -55,7 +51,8 @@ const VXLS_Y_SIZE: i32 = 800; //  8.0 mm
 const VXLS_Z_SIZE: i32 = (SKIN_DELTA_Z_IN_UM / UM_PER_VXL) as i32;
 const VXL_XZ_DIMS: (usize, usize) = (VXLS_X_SIZE as usize, VXLS_Z_SIZE as usize);
 
-const MAGIG_NUM_0: f64 = 2.303 * 150. / 64_500. / MM_PER_CM; //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"  
+//  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
+const MAGIG_NUM_0: f64 = 2.303 * 150. / 64_500. / MM_PER_CM;
 
 const SA_O2: f64 = 0.98; //  Saturation en oxygène artériel de 98%
 const SV_O2: f64 = 0.9 * SA_O2; //  Saturation en oxygène veineux est 10% moindre que l'arteriel
@@ -425,7 +422,7 @@ impl VxlRanges {
 }
 const VXL_RANGES: VxlRanges = VxlRanges::new(VXLS_X_SIZE, VXLS_Y_SIZE, VXLS_Z_SIZE);
 
-fn plot(vxls: &mut Array2<f64>, wavelength_u: u16, k_photon: usize) -> Result<()> {
+fn plot(vxls: &mut Array2<f64>, wavelength_u: u16, k_photon: u16, verbose: bool) -> Result<()> {
     vxls.par_mapv_inplace(f64::log10);
     let binding = vxls.t();
     let view = binding.slice(s![..;-1, ..]);
@@ -450,31 +447,32 @@ fn plot(vxls: &mut Array2<f64>, wavelength_u: u16, k_photon: usize) -> Result<()
         .title(format!("{k_photon}k photon at {wavelength_u}nm"))
         .save(format!(".heatmap-{wavelength_u}nm{k_photon}kphoton.png"))?;
 
-    println!("Plot finished in {:?}", start.elapsed());
+    if verbose {
+        println!("Plot finished in {:?}", start.elapsed());
+    }
 
     Ok(())
 }
 
-fn partie_1_2(available_parallelism: usize) -> Result<()> {
-    let chunk_size = (NB_PHOTONS_1_2 / available_parallelism) + 1;
-    dbg!(&chunk_size);
+fn partie_1_2(k_photon: u16, wavelength_u: u16, available_parallelism: usize, verbose: bool) -> Result<()> {
+    let nb_photons = 1_000_usize * k_photon as usize;
+    let chunk_size = (nb_photons / available_parallelism) + 1;
+    if verbose {
+        dbg!(&SKIN_DELTA_Z_IN_UM);
+    }
 
-    dbg!(&SKIN_DELTA_Z_IN_UM);
-
-    dbg!("partie_1_2: before monte_carlo()");
     let start = Instant::now();
 
-    let wavelength_u = 700_u16;
-    let k_photon = NB_PHOTONS_1_2 / 1_000;
-
-    let op_vxls = monte_carlo(wavelength_u, chunk_size);
+    let op_vxls = monte_carlo(nb_photons, wavelength_u, chunk_size, verbose);
     println!(
-        "monte_carlo of {k_photon}k photon at {wavelength_u}nm finished in {:?}",
+        "monte_carlo of {k_photon}k photon at {wavelength_u}nm finished on {available_parallelism} cores in {:?}",
         start.elapsed()
     );
 
     if let Some(mut vxls) = op_vxls {
-        plot(&mut vxls, wavelength_u, k_photon)?;
+        plot(&mut vxls, wavelength_u, k_photon, verbose)?;
+    } else {
+        println!("wavelenght of {wavelength_u}nm not supported.");
     }
 
     Ok(())
@@ -964,26 +962,23 @@ fn co_sin(sin_or_cos: f64) -> f64 {
 }
 
 /// wavelength in nm
-fn monte_carlo(wavelength_u: u16, _chunk_size: usize) -> Option<Array2<f64>> {
+fn monte_carlo(nb_photons: usize, wavelength_u: u16, chunk_size: usize, verbose: bool) -> Option<Array2<f64>> {
     let mut skin = Skin::default();
-    let mut local_vxls = Array2::<f64>::zeros(VXL_XZ_DIMS);
     skin.try_model_at(wavelength_u).map(|skin| {
-        println!("{:#?}", &skin);
-        // let _:i32 = (0..NB_PHOTONS_1_2).into_par_iter().map(|nth_photon| {
-        let _ =
-            (0..NB_PHOTONS_1_2)
-            // .into_par_iter()
-            //  // Chunking the simulations reduces the overhead of creating many arrays
-            // .chunks(chunk_size)
-            .map(|nth_photon| {
+        if verbose { println!("{skin:#?}" ); }
+            (0..nb_photons)
+            .into_par_iter()
+             // Chunking the simulations reduces the overhead of creating many arrays
+            .chunks(chunk_size)
+            .map(|chunk| {
                 // Each thread gets a local partial grid
-                // let mut local_vxls = Array2::<f64>::zeros(VXL_XZ_DIMS);
+                let mut local_vxls = Array2::<f64>::zeros(VXL_XZ_DIMS);
 
                 // Each thread gets its own thread-local RNG.
                 // This is fast and non-blocking.
                 let mut rng = rand::rng();
 
-                // for _ in chunk {
+                for nth_photon in chunk {
                     let mut  photon = Photon::new(skin, &mut rng);
                     // if nth_photon % 1_000 == 0 { dbg!(&nth_photon, &photon); }
                     #[allow(clippy::while_float)]
@@ -1015,7 +1010,7 @@ fn monte_carlo(wavelength_u: u16, _chunk_size: usize) -> Option<Array2<f64>> {
                             break;
                         }
                     }
-                    if nth_photon % 1_000 == 0 {
+                    if verbose && nth_photon.is_multiple_of(1_000) {
                         let pos = &photon.pos;
                         if pos.is_within_vxls() {
                             println!("{nth_photon}th photon : vxls[x:{}][z:{}] = {:?}", pos.x, pos.z, local_vxls[[pos.x(), pos.z()]]);
@@ -1024,17 +1019,14 @@ fn monte_carlo(wavelength_u: u16, _chunk_size: usize) -> Option<Array2<f64>> {
                             println!("{nth_photon}th photon pos : {pos:?} out of vxls[{VXLS_X_SIZE}][{VXLS_Y_SIZE}][{VXLS_Z_SIZE}] !");
                         }
                     }
-                // }
-                // local_vxls
-                0
+                }
+                local_vxls
             })
-            .sum::<i32>();
-            local_vxls
-            // .reduce(|| Array2::<f64>::zeros(VXL_XZ_DIMS), 
-            //     |mut total, local| {
-            //         total += &local; 
-            //         total
-            //     },
-            // )
+            .reduce(|| Array2::<f64>::zeros(VXL_XZ_DIMS),
+                |mut total, local| {
+                    total += &local;
+                    total
+                },
+            )
     })
 }
