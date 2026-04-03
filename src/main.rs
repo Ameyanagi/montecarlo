@@ -1,10 +1,11 @@
 use clap::Parser;
 pub use montecarlo::{
+    Wavelength,
     error::{Error, Result},
     run,
 };
 
-/// Monte carlo simulation of photons absorption by skin
+/// Monte carlo simulation of photons propagation in skin
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
 struct Args {
@@ -24,5 +25,5 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    run(args.kphoton, args.wavelenght, args.verbose)
+    run(args.kphoton, Wavelength(args.wavelenght), args.verbose)
 }

@@ -2,8 +2,7 @@ pub mod error;
 pub use error::{Error, Result};
 
 use std::{collections::HashMap, f64::consts::PI, ops::Range, sync::OnceLock, thread, time::Instant};
-// use tracing::debug;
-// use derive_more::{Index, IndexMut};
+
 use ndarray::parallel::prelude::*;
 use ndarray::{Array2, s};
 use rand::prelude::*;
@@ -12,23 +11,134 @@ use strum::EnumCount;
 
 // use uom::si::f64::*;
 // use uom::si::{length::{millimeter, centimeter},reciprocal_length::{reciprocal_millimeter, reciprocal_centimeter}};
-pub fn run(k_photon: u16, wavelenght: u16, verbose: bool) -> Result<()> {
+
+/// An `ndarray::Array2<f64>` of a simulation accumulated `Photon`s `weight` losses, as a slice of `Voxels` along the XZ axis
+pub type VoxelsSliceXZ = Array2<f64>;
+
+/// A `u16` wrapper to unambiguously pass a `wavelength` around
+#[derive(Debug, Clone, Copy)]
+pub struct Wavelength(pub u16);
+
+/// Prepares, runs and plots a Monte Carlo simulation
+///
+/// ### Parameters
+///
+/// - `k_photon` - the number of 1000s of photons simulated
+/// - `wavelength` - the wavelength of the simulated photons, in nm
+/// - `verbose` - verbosity of the run
+///
+/// ### Errors
+///
+/// May return `Err` from `std::thread::available_parallelism()` or the `ruviz` crate `Plot` command
+pub fn run(k_photon: u16, wavelength: Wavelength, verbose: bool) -> Result<()> {
     let available_parallelism = thread::available_parallelism()?.get();
 
-    partie_3_1();
-    partie_1_2(k_photon, wavelenght, available_parallelism, verbose)
+    let nb_photons = 1_000_usize * k_photon as usize;
+    let chunk_size = (nb_photons / available_parallelism) + 1;
+    if verbose {
+        dbg!(&SKIN_DELTA_Z_IN_UM);
+    }
+
+    let start = Instant::now();
+
+    let op_vxls = monte_carlo(nb_photons, wavelength, chunk_size, verbose);
+    println!(
+        "monte_carlo of {k_photon}k photon at {}nm finished on {available_parallelism} cores in {:?}",
+        wavelength.0,
+        start.elapsed()
+    );
+
+    if let Some(mut vxls) = op_vxls {
+        plot(&mut vxls, k_photon, wavelength, verbose)?;
+    } else {
+        println!("wavelenght of {}nm not supported.", &wavelength.0);
+    }
+
+    Ok(())
 }
 
-const fn partie_3_1() {}
+/// Plots the `VoxelsSliceXZ` returned by `monte_carlo()`
+///
+/// ### Parameters
+///
+/// - `vxl_xz_slice` - the `ndarray::Array2<f64>` of a simulation accumulated `Photon`s `weight` losses, as a slice of
+///   `Voxels` along the XZ axis
+/// - `k_photon` - the number of 1000s of `Photon`s simulated
+/// - `wavelength` - the `wavelength` of the simulated `Photon`s
+/// - `verbose` - verbosity of the plotting
+///
+/// ### Errors
+///
+/// May return `Err` from the `ruviz` crate `Plot` command
+pub fn plot(vxl_xz_slice: &mut VoxelsSliceXZ, k_photon: u16, wavelength: Wavelength, verbose: bool) -> Result<()> {
+    vxl_xz_slice.par_mapv_inplace(f64::log10);
+    let binding = vxl_xz_slice.t();
+    let view = binding.slice(s![..;-1, ..]);
 
+    let x_axis_scaling = f64::from(VXLS_X_SIZE) * MM_PER_VXL;
+    let z_axis_scaling = f64::from(VXLS_Z_SIZE) * MM_PER_VXL;
+
+    let start = Instant::now();
+
+    Plot::new()
+        .heatmap(
+            &view,
+            Some(
+                HeatmapConfig::new()
+                     .colorbar(true)
+                     .colorbar_label("Absorbed Energy")
+            ),
+        )
+        .xlim(0., x_axis_scaling)
+        .xlabel("Position in x(mm)")
+        // .ylim(0., z_axis_scaling)
+        .ylim(z_axis_scaling, 0.)
+        .ylabel("Depth (mm)")
+        .title(format!("{k_photon}k photons at {}nm", wavelength.0))
+        .save(format!(".heatmap-{}nm{k_photon}kphoton.png", wavelength.0))?;
+
+    if verbose {
+        println!("Plot finished in {:?}", start.elapsed());
+    }
+
+    Ok(())
+}
+
+/// Number of mm in a cm
 const MM_PER_CM: f64 = 10.;
+/// Number of µm in a single Voxel
 const UM_PER_VXL: u16 = 10;
+/// Number of mm in a single Voxel
 const MM_PER_VXL: f64 = UM_PER_VXL as f64 / 1_000.;
 
-const LOWEST_WAVELENGTH: u16 = 600; // nanometer
+/// The different kinds of skin layers
+#[derive(Debug, EnumCount, Clone, Copy, PartialEq)]
+enum SkinLayerKind {
+    StratumCorneum,
+    Epiderme,
+    PapileDermique,
+    DermeSuperieur,
+    DermeReticulaire,
+    DermeProfond,
+}
+use SkinLayerKind::{DermeProfond, DermeReticulaire, DermeSuperieur, Epiderme, PapileDermique, StratumCorneum};
 
-const INDICE_REFRAC_AIR: f64 = 1.000_293; // à T.P.N. Unused, but for isometric solution.
+/// The static model for a `Skin` layer
+#[derive(Debug, Clone, Copy)]
+struct SkinLayer {
+    /// The kind of skin layer
+    kind: SkinLayerKind,
+    /// The depth of a skin layer in µm
+    dz_in_um: u16,
+    /// The indice de refraction of a skin layer  
+    indice_refrac: f64,
+    /// The `v_b` of a skin layer  
+    v_b: f64,
+    /// The `v_w` of a skin layer  
+    v_w: f64,
+}
 
+/// Complete static model of the `SkinLayer`s of a simulation
 #[rustfmt::skip]
 const SKIN_LAYERS: [SkinLayer; SkinLayerKind::COUNT] = [
     SkinLayer { dz_in_um:  20, indice_refrac: 1.42, v_b: 0.00, v_w: 0.05, kind: StratumCorneum },
@@ -39,6 +149,7 @@ const SKIN_LAYERS: [SkinLayer; SkinLayerKind::COUNT] = [
     SkinLayer { dz_in_um: 300, indice_refrac: 1.39, v_b: 0.01, v_w: 0.70, kind: DermeProfond },
 ];
 
+/// Sum of the `.dz_un_um` of all `SkinLayer`s in `SKIN_LAYERS`
 const SKIN_DELTA_Z_IN_UM: u16 = SKIN_LAYERS[StratumCorneum as usize].dz_in_um
     + SKIN_LAYERS[Epiderme as usize].dz_in_um
     + SKIN_LAYERS[PapileDermique as usize].dz_in_um
@@ -46,32 +157,97 @@ const SKIN_DELTA_Z_IN_UM: u16 = SKIN_LAYERS[StratumCorneum as usize].dz_in_um
     + SKIN_LAYERS[DermeReticulaire as usize].dz_in_um
     + SKIN_LAYERS[DermeProfond as usize].dz_in_um;
 
+/// Number of `Voxels` in the `x` dimension
 const VXLS_X_SIZE: i32 = 800; //  8.0 mm
+/// Number of `Voxels` in the `y` dimension
 const VXLS_Y_SIZE: i32 = 800; //  8.0 mm
+/// Number of `Voxels` in the `z` dimension
 const VXLS_Z_SIZE: i32 = (SKIN_DELTA_Z_IN_UM / UM_PER_VXL) as i32;
+/// `(VXLS_X_SIZE as usize, VXLS_Z_SIZE as usize)`
 const VXL_XZ_DIMS: (usize, usize) = (VXLS_X_SIZE as usize, VXLS_Z_SIZE as usize);
 
-//  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
-const MAGIG_NUM_0: f64 = 2.303 * 150. / 64_500. / MM_PER_CM;
+/// A `f64` wrapper to unambiguously pass a `delta_w_coeff` around
+#[derive(Debug, Clone, Copy, Default)]
+struct DeltaWCoeff(f64);
 
-const SA_O2: f64 = 0.98; //  Saturation en oxygène artériel de 98%
-const SV_O2: f64 = 0.9 * SA_O2; //  Saturation en oxygène veineux est 10% moindre que l'arteriel
-const SEUIL_DE_POIDS_CRITIQUE: f64 = 0.01;
+/// The complete skin layer model used in the simulation, with wavelength-related computed members
+#[derive(Debug)]
+struct SkinLayerAtWl {
+    /// Reference to the static skin layer model it extends
+    layer: &'static SkinLayer,
 
-//  En dessous d’un weight seuil critique (Wc) prédéterminé, le paquet a une chance sur M de continuer à être simulé,
-//  sinon "il disparaı̂t". Pour éviter que de l’énergie disparaisse pris dans l'ensemble, lorsque le photon survie,
-//  on multiplie son énergie par M afin de compenser pour les fois ou l’énergie disparait.
-const M: f64 = 10.;
-const M_INV: f64 = 1. / M; //  Probabilité de ne pas disparitre
+    /// Ratio of this layer `indice_refrac` to that of the skin layer above in the model
+    pub indice_refrac_ratio: f64,
+    /// Range of voxel `z` coordinates contained in this skin ayer, considering all those above it
+    pub vxl_z_range: Range<i32>,
 
-/// Coefficient d'anisotropie
-const G: f64 = 0.9;
-const G_SQUARE: f64 = G * G;
+    /// Computed `mu_t` of this skin layer, in `reciprocal_vxl` or vxl^-1
+    pub mu_t: f64, //
+    /// Computed `mu_a/mu_t` of this skin layer
+    pub mu_a_on_mu_t: DeltaWCoeff,
+}
 
-const V_MEL: f64 = 0.1;
-const MU_S: f64 = 20.1 * MM_PER_VXL;
+impl SkinLayerAtWl {
+    /// Returns this skin layer `SkinLayerKind`
+    const fn kind(&self) -> SkinLayerKind {
+        self.layer.kind
+    }
 
-const HB_SIZE: u16 = 201; //  Source Scott Prahl, lambda:nm, le reste : cm^-1/M
+    /// Returns this skin layer `.indice_refrac`
+    const fn indice_refrac(&self) -> f64 {
+        self.layer.indice_refrac
+    }
+
+    /// Recomputes the `mu_t` and `mu_a_on_mu_t` member of the skin layer according to some `wavelength` parameters
+    fn model_at(&mut self, wavelength_f: f64, val_hb_0: f64, val_hb_1: f64, val_water: f64) {
+        //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
+        const MAGIG_NUM_0: f64 = 2.303 * 150. / 64_500. / MM_PER_CM;
+        const V_MEL: f64 = 0.1;
+        /// Saturation en oxygène artériel de 98%
+        const SA_O2: f64 = 0.98;
+        /// Saturation en oxygène veineux est 10% moindre que l'arteriel
+        const SV_O2: f64 = 0.9 * SA_O2;
+        const MU_S: f64 = 20.1 * MM_PER_VXL;
+
+        //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
+        let mu_a_baseline = 7.84e-7 * wavelength_f.powf(-3.255) / MM_PER_CM; //  reciprocal_mm
+
+        let mu_absorption_oxyhemoglobine = val_hb_0 * MAGIG_NUM_0; // reciprocal_mm
+        let mu_a_hemoglobine = val_hb_1 * MAGIG_NUM_0; //  reciprocal_mm
+
+        let mu_w = val_water / MM_PER_CM; //  reciprocal_mm
+
+        //  Coeff artere & veine
+        let (mu_art, mu_vei) = (
+            SA_O2.mul_add(mu_absorption_oxyhemoglobine, (1. - SA_O2) * mu_a_hemoglobine),
+            SV_O2.mul_add(mu_absorption_oxyhemoglobine, (1. - SV_O2) * mu_a_hemoglobine),
+        );
+
+        let SkinLayer { kind, v_w, v_b, .. } = *self.layer;
+
+        let mu_a = MM_PER_VXL
+            * match kind {
+                StratumCorneum | Epiderme => (1. - (V_MEL + v_w)).mul_add(
+                    mu_a_baseline,
+                    V_MEL.mul_add(6.6e+10 * wavelength_f.powf(-3.33) / MM_PER_CM, v_w * mu_w),
+                ),
+                _ => {
+                    //  Tout sous l'Epiderme
+                    let v_a = v_b / 2.; //  split 50-50 with v_v
+                    let v_v = v_a;
+                    (1. - (v_a + v_v + v_w)).mul_add(mu_a_baseline, v_w.mul_add(mu_w, v_a * mu_art + v_v * mu_vei))
+                }
+            };
+        self.mu_t = mu_a + MU_S;
+        self.mu_a_on_mu_t = DeltaWCoeff(mu_a / self.mu_t);
+    }
+}
+
+/// Lowest photon `Wavelength` allowed by this simulator.
+const LOWEST_WAVELENGTH: u16 = 600; // nanometer
+/// Number of even `Wavelength` supported starting at `LOWEST_WAVELENGTH`
+const HB_SIZE: u16 = 201;
+///  Source Scott Prahl, (lambda en nm, le reste en cm^-1/M)
 const HB_ARRAY: [(f64, f64); HB_SIZE as usize] = [
     (3_200.0, 14_677.2),
     (2_664.0, 13_622.4),
@@ -276,17 +452,20 @@ const HB_ARRAY: [(f64, f64); HB_SIZE as usize] = [
     (1_024.0, 206.784),
 ];
 
-fn hb_for_wavelength(wavelength_u: u16) -> Option<(f64, f64)> {
-    if (LOWEST_WAVELENGTH..LOWEST_WAVELENGTH + HB_SIZE * 2).contains(&wavelength_u) && wavelength_u.is_multiple_of(2) {
-        Some(HB_ARRAY[usize::from((wavelength_u - LOWEST_WAVELENGTH) / 2)])
+/// Returns `Some` `hb` specs of a `Wavelength` if it's known, `None` otherwise
+fn try_get_hb_for(wavelength: Wavelength) -> Option<(f64, f64)> {
+    if (LOWEST_WAVELENGTH..LOWEST_WAVELENGTH + HB_SIZE * 2).contains(&wavelength.0) && wavelength.0.is_multiple_of(2) {
+        Some(HB_ARRAY[usize::from((wavelength.0 - LOWEST_WAVELENGTH) / 2)])
     } else {
         None
     }
 }
+/// Source Segelstein, cm^-1
 static WATER_HASHMAP: OnceLock<HashMap<u16, f64>> = OnceLock::new();
 
+/// Returns `Some` `water` specs of a `Wavelength` if it's known, `None` otherwise
 #[allow(clippy::too_many_lines)]
-fn water_hashmap(wavelength_u: u16) -> Option<f64> {
+fn try_get_water_for(wavelength: Wavelength) -> Option<f64> {
     WATER_HASHMAP
         .get_or_init(|| {
             [
@@ -392,182 +571,26 @@ fn water_hashmap(wavelength_u: u16) -> Option<f64> {
             .into_iter()
             .collect()
         })
-        .get(&wavelength_u)
+        .get(&wavelength.0)
         .copied()
 }
 
-struct VxlRanges {
-    x: Range<i32>,
-    y: Range<i32>,
-    z: Range<i32>,
+/// Skin model used in the Monte Carlo simulation
+#[derive(Debug)]
+struct Skin {
+    layers: [SkinLayerAtWl; SkinLayerKind::COUNT],
+    wavelength: Wavelength,
 }
 
-impl VxlRanges {
-    pub const fn new(x_size: i32, y_size: i32, z_size: i32) -> Self {
-        Self {
-            x: 0..x_size,
-            y: 0..y_size,
-            z: 0..z_size,
-        }
-    }
-    fn x_contains(&self, x: i32) -> bool {
-        self.x.contains(&x)
-    }
-    fn y_contains(&self, y: i32) -> bool {
-        self.y.contains(&y)
-    }
-    fn z_contains(&self, z: i32) -> bool {
-        self.z.contains(&z)
-    }
-}
-const VXL_RANGES: VxlRanges = VxlRanges::new(VXLS_X_SIZE, VXLS_Y_SIZE, VXLS_Z_SIZE);
-
-fn plot(vxls: &mut Array2<f64>, wavelength_u: u16, k_photon: u16, verbose: bool) -> Result<()> {
-    vxls.par_mapv_inplace(f64::log10);
-    let binding = vxls.t();
-    let view = binding.slice(s![..;-1, ..]);
-
-    let x_axis_scaling = f64::from(VXLS_X_SIZE) * MM_PER_VXL;
-    let z_axis_scaling = f64::from(VXLS_Z_SIZE) * MM_PER_VXL;
-
-    let start = Instant::now();
-
-    Plot::new()
-        .heatmap(
-            &view,
-            Some(
-                HeatmapConfig::new().colorbar(true).colorbar_label("Énergie absorbée"), //  No way to scale the colorbar axis in log yet
-            ),
-        )
-        .xlim(0., x_axis_scaling)
-        .xlabel("Position en x(mm)")
-        .ylim(0., z_axis_scaling)
-        // .ylim(z_axis_scaling, 0.)
-        .ylabel("Profondeur (mm)")
-        .title(format!("{k_photon}k photon at {wavelength_u}nm"))
-        .save(format!(".heatmap-{wavelength_u}nm{k_photon}kphoton.png"))?;
-
-    if verbose {
-        println!("Plot finished in {:?}", start.elapsed());
-    }
-
-    Ok(())
-}
-
-fn partie_1_2(k_photon: u16, wavelength_u: u16, available_parallelism: usize, verbose: bool) -> Result<()> {
-    let nb_photons = 1_000_usize * k_photon as usize;
-    let chunk_size = (nb_photons / available_parallelism) + 1;
-    if verbose {
-        dbg!(&SKIN_DELTA_Z_IN_UM);
-    }
-
-    let start = Instant::now();
-
-    let op_vxls = monte_carlo(nb_photons, wavelength_u, chunk_size, verbose);
-    println!(
-        "monte_carlo of {k_photon}k photon at {wavelength_u}nm finished on {available_parallelism} cores in {:?}",
-        start.elapsed()
-    );
-
-    if let Some(mut vxls) = op_vxls {
-        plot(&mut vxls, wavelength_u, k_photon, verbose)?;
-    } else {
-        println!("wavelenght of {wavelength_u}nm not supported.");
-    }
-
-    Ok(())
-}
-
+/// Converts µm to voxel discrete unit.
 const fn um_to_vxl(um: u16) -> i32 {
     (um / UM_PER_VXL) as i32
 }
 
-#[derive(Debug, EnumCount, Clone, Copy, PartialEq)]
-enum SkinLayerKind {
-    StratumCorneum,
-    Epiderme,
-    PapileDermique,
-    DermeSuperieur,
-    DermeReticulaire,
-    DermeProfond,
-}
-use SkinLayerKind::{DermeProfond, DermeReticulaire, DermeSuperieur, Epiderme, PapileDermique, StratumCorneum};
-
-#[derive(Debug, Clone, Copy)]
-struct SkinLayer {
-    kind: SkinLayerKind,
-    dz_in_um: u16,
-    indice_refrac: f64,
-    v_b: f64,
-    v_w: f64,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DeltaWCoeff(f64);
-
-#[derive(Debug)]
-struct SkinLayerAtWl {
-    layer: &'static SkinLayer,
-
-    pub indice_refrac_ratio: f64,
-    pub vxl_z_range: Range<i32>,
-
-    pub mu_t: f64, //  in reciprocal_vxl or vxl^-1
-    pub mu_a_on_mu_t: DeltaWCoeff,
-}
-
-impl SkinLayerAtWl {
-    const fn kind(&self) -> SkinLayerKind {
-        self.layer.kind
-    }
-
-    const fn indice_refrac(&self) -> f64 {
-        self.layer.indice_refrac
-    }
-
-    fn model_at(&mut self, wavelength: f64, val_hb_0: f64, val_hb_1: f64, val_water: f64) {
-        //  "J'ai assumé que l'output était en cm^-1, donc divisé par 10 pour mm^-1"
-        let mu_a_baseline = 7.84e-7 * wavelength.powf(-3.255) / MM_PER_CM; //  reciprocal_mm
-
-        let mu_absorption_oxyhemoglobine = val_hb_0 * MAGIG_NUM_0; // reciprocal_mm
-        let mu_a_hemoglobine = val_hb_1 * MAGIG_NUM_0; //  reciprocal_mm
-
-        let mu_w = val_water / MM_PER_CM; //  reciprocal_mm
-
-        //  Coeff artere & veine
-        let (mu_art, mu_vei) = (
-            SA_O2.mul_add(mu_absorption_oxyhemoglobine, (1. - SA_O2) * mu_a_hemoglobine),
-            SV_O2.mul_add(mu_absorption_oxyhemoglobine, (1. - SV_O2) * mu_a_hemoglobine),
-        );
-
-        let SkinLayer { kind, v_w, v_b, .. } = *self.layer;
-
-        let mu_a = MM_PER_VXL
-            * match kind {
-                StratumCorneum | Epiderme => (1. - (V_MEL + v_w)).mul_add(
-                    mu_a_baseline,
-                    V_MEL.mul_add(6.6e+10 * wavelength.powf(-3.33) / MM_PER_CM, v_w * mu_w),
-                ),
-                _ => {
-                    //  Tout sous l'Epiderme
-                    let v_a = v_b / 2.; //  split 50-50 with v_v
-                    let v_v = v_a; //  split 50-50 with v_a
-                    (1. - (v_a + v_v + v_w)).mul_add(mu_a_baseline, v_w.mul_add(mu_w, v_a * mu_art + v_v * mu_vei))
-                }
-            };
-        self.mu_t = mu_a + MU_S;
-        self.mu_a_on_mu_t = DeltaWCoeff(mu_a / self.mu_t);
-    }
-}
-
-#[derive(Debug)]
-struct Skin {
-    layers: [SkinLayerAtWl; SkinLayerKind::COUNT],
-    wavelength_u: u16,
-}
-
 impl Default for Skin {
     fn default() -> Self {
+        const INDICE_REFRAC_AIR: f64 = 1.000_293; // à T.P.N. Unused, but for isometric solution.
+
         let mut dz_in_vxl_acc = 0;
         let mut indice_refrac_denominateur = INDICE_REFRAC_AIR;
 
@@ -578,12 +601,11 @@ impl Default for Skin {
                 let dz_in_vxl_start = dz_in_vxl_acc;
                 dz_in_vxl_acc += um_to_vxl(*dz_in_um);
 
-                let indice_refrac_numerateur = indice_refrac_denominateur /* precedent*/ ;
+                let indice_refrac_numerateur = indice_refrac_denominateur;  // precedent
                 indice_refrac_denominateur = *indice_refrac;
 
                 SkinLayerAtWl {
                     layer: skin_layer,
-                    // kind, /*dz_in_mm,*/ indice_refrac, v_b, v_w,
 
                     indice_refrac_ratio: indice_refrac_numerateur / indice_refrac_denominateur,
                     vxl_z_range: dz_in_vxl_start..dz_in_vxl_acc,
@@ -592,34 +614,39 @@ impl Default for Skin {
                     mu_a_on_mu_t: DeltaWCoeff::default(),
                 }
             }).collect::<Vec<_>>().try_into().expect("SKIN_LAYERS [SkinLayer; SkinLayerKind::COUNT] to SkinLayerAtWl[SkinLayerAtWl; SkinLayerKind::COUNT]"),
-            wavelength_u: LOWEST_WAVELENGTH,
+            wavelength: Wavelength(LOWEST_WAVELENGTH),
         }
     }
 }
 
 impl Skin {
-    fn try_model_at(&mut self, wavelength_u: u16) -> Option<&mut Self> {
-        if let Some((val_hb_0, val_hb_1)) = hb_for_wavelength(wavelength_u)
-            && let Some(val_water) = water_hashmap(wavelength_u)
+    /// Returns `Some` version of this `Skin` model if it can be built for a given `Wavelength`, or `None` otherwise
+    fn try_model_at(&mut self, wavelength: Wavelength) -> Option<&mut Self> {
+        if let Some((val_hb_0, val_hb_1)) = try_get_hb_for(wavelength)
+            && let Some(val_water) = try_get_water_for(wavelength)
         {
-            let wavelength = f64::from(wavelength_u);
+            let wavelength_f = f64::from(wavelength.0);
 
             for skin_layer_at_wl in &mut self.layers {
-                skin_layer_at_wl.model_at(wavelength, val_hb_0, val_hb_1, val_water);
+                skin_layer_at_wl.model_at(wavelength_f, val_hb_0, val_hb_1, val_water);
             }
-            self.wavelength_u = wavelength_u;
+            self.wavelength = wavelength;
             Some(self)
         } else {
             None
         }
     }
 
+    /// Returns the `SkinLayerAtWl` for a `SkinLayerKind` passed in parameter
     const fn skin_layer(&self, skin_layer_kind: SkinLayerKind) -> &SkinLayerAtWl {
         &self.layers[skin_layer_kind as usize]
     }
+
+    /// Randomly generates a new `path_seg.len_in_vxl` according to a `SkinLayerKind` passed in parameter
     fn new_path_seg_len_in_vxl(&self, src_skin_layer_kind: SkinLayerKind, rng: &mut ThreadRng) -> f64 {
         //  parcours du groupe de photon pour cette itération
         let mut xsi_1: f64 = rng.random::<f64>();
+
         //  Exclude 0 from the interval because ln(0) = ∞, or NaN.
         #[allow(clippy::while_float)]
         while 0. == xsi_1 {
@@ -629,12 +656,17 @@ impl Skin {
         -xsi_1.ln() / self.skin_layer(src_skin_layer_kind).mu_t //  in vxl
     }
 
+    /// Returns `Some` `SkinLayerAtWl` if the photon depth passed in parameter is within the `Voxels`, `None` otherwise
     fn try_skin_layer(&self, photon_pos_z: i32) -> Option<&SkinLayerAtWl> {
         self.layers
             .iter()
             .find(|skin_layer| skin_layer.vxl_z_range.contains(&photon_pos_z))
     }
 
+    /// Simulate the absorption of a `Photon`, moving it into the `Voxels`
+    ///
+    /// Returns `Some` pair of new `PhotonPathSeg` direction and `delta_w_coeff` to be applied,
+    /// or `None` if the `Photon` displacement moves it out of the `Voxels`
     fn absorption(&self, photon: &mut Photon, rng: &mut ThreadRng) -> Option<(UnitVec, DeltaWCoeff)> {
         // let Photon { pos, path_seg, .. } = photon;
         let SkinLayer {
@@ -645,7 +677,7 @@ impl Skin {
         let path_seg = photon.path_seg;
         let src_pos_z = photon.pos.z;
 
-        // With `len_in_vxl: f64` possibly extremeny large, `photon.path_seg.dz()` conversion
+        // With `len_in_vxl: f64` possibly extremely large, `photon.path_seg.dz()` conversion
         // to `i32` may resut in `i32::MIN` or `i32:MAX`. We insure the addition here doesn't
         // panic (or wrap-around in `release` mode) by using `i32::saturating_add_signed()`.
         if let Some(dst_skin_layer) = self.try_skin_layer(src_pos_z.saturating_add(photon.path_seg.dz())) {
@@ -660,7 +692,7 @@ impl Skin {
                 //  returns photon.pos.is_within_xy_of_vxls()
                 if photon.move_of(path_seg.len_in_vxl, 0., dst_skin_layer_kind) {
                     // photon is staying within voxels in z
-                    Some((photon.path_seg.dir.same_refrac(rng), mu_a_on_mu_t))
+                    Some((photon.path_seg.dir.iso_refrac(rng), mu_a_on_mu_t))
                 } else {
                     None
                 } //  not within voxels.
@@ -672,11 +704,11 @@ impl Skin {
                 if photon.move_of(moving_len, path_seg.len_in_vxl - moving_len, dst_skin_layer_kind) {
                     // skin layer transition is always within voxels in z
                     // skin layers with different indice_refrac: the path_seg.dir will change
-                    #[allow(clippy::float_cmp)] //  as we want to filter the know ratios = 1.0
+                    #[allow(clippy::float_cmp)] //  as we do want to filter the exact know ratios = 1.0
                     if 1.0 == dst_skin_layer.indice_refrac_ratio {
-                        Some((photon.path_seg.dir.same_refrac(rng), mu_a_on_mu_t))
+                        Some((photon.path_seg.dir.iso_refrac(rng), mu_a_on_mu_t))
                     } else {
-                        Some(photon.path_seg.dir.diff_refrac(
+                        Some(photon.path_seg.dir.aniso_refrac(
                             n1,
                             dst_skin_layer.indice_refrac(),
                             dst_skin_layer.indice_refrac_ratio,
@@ -695,29 +727,73 @@ impl Skin {
     }
 }
 
+/// A trio of `i32` Ranges along the `x`, `y` and `z` axis allowing to find if a `Photon` is located within the `Voxels`
+struct VxlRanges {
+    x: Range<i32>,
+    y: Range<i32>,
+    z: Range<i32>,
+}
+
+impl VxlRanges {
+    /// Instantiate a `VxlRanges` from its `x`. `y`, and `z` dimensions
+    pub const fn new(x_size: i32, y_size: i32, z_size: i32) -> Self {
+        Self {
+            x: 0..x_size,
+            y: 0..y_size,
+            z: 0..z_size,
+        }
+    }
+    /// Return true if a `Photon` `x` position is contained within the `Voxels`
+    fn x_contains(&self, x: i32) -> bool {
+        self.x.contains(&x)
+    }
+    /// Return true if a `Photon` `y` position is contained within the `Voxels`
+    fn y_contains(&self, y: i32) -> bool {
+        self.y.contains(&y)
+    }
+    /// Return true if a `Photon` `z` position is contained within the `Voxels`
+    fn z_contains(&self, z: i32) -> bool {
+        self.z.contains(&z)
+    }
+}
+
+/// The single instance of `VxlRanges` used in this simulation
+const VXL_RANGES: VxlRanges = VxlRanges::new(VXLS_X_SIZE, VXLS_Y_SIZE, VXLS_Z_SIZE);
+
+/// `A i32`-based 3D position of a `Photon`, in or out of the `Voxels`
 #[derive(Debug, Clone, Copy)]
-pub struct VoxelPos {
+struct VoxelPos {
+    ///  Position of a `Photon` along the `x` axis, in or out of the `Voxels`
     x: i32,
+    ///  Position of a `Photon` along the `y` axis, in or out of the `Voxels`
     y: i32,
+    ///  Position of a `Photon` along the `z` axis, in or out of the `Voxels`
     z: i32,
 }
+
 impl VoxelPos {
-    ///  Validated never negative by `skin.try_skin_layer()` at all times, so usize conversion is always valid.
+    ///  Returns `x as usize`.
+    ///
+    /// `x` is validated as never negative by `skin.try_skin_layer()` at all times, so usize conversion is *always* valid.
     const fn x(&self) -> usize {
         #![allow(clippy::cast_sign_loss)]
         self.x as usize
     }
 
-    ///  Validated never negative  by `is_within_xy_of_vxls()` at all times, so usize conversion is always valid.
+    ///  Returns `z as usize`.
+    ///
+    ///  `z` is validated as never negative  by `is_within_xy_of_vxls()` at all times, so usize conversion is *always* valid.
     const fn z(&self) -> usize {
         #![allow(clippy::cast_sign_loss)]
         self.z as usize
     }
 
+    /// Test that this `VoxelPos` is within the Voxels x, y and z ranges.
     fn is_within_vxls(&self) -> bool {
         VXL_RANGES.x_contains(self.x) && VXL_RANGES.y_contains(self.y) && VXL_RANGES.z_contains(self.z)
     }
 
+    /// Test that this `VoxelPos` is within the Voxels x and y ranges.
     fn is_within_xy_of_vxls(&self) -> bool {
         VXL_RANGES.x_contains(self.x) && VXL_RANGES.y_contains(self.y)
     }
@@ -737,26 +813,43 @@ impl VoxelPos {
         self.is_within_xy_of_vxls()
     }
 }
+
+/// A `i32`-based 3D distance between two positions of a `Photon`, in or out of the `Voxels`
 #[derive(Debug, Clone, Copy)]
 struct DeltaVoxelPos {
+    ///  Distance between two positions of a `Photon` along the `x` axis, in or out of the `Voxels`
     dx: i32,
+    ///  Distance between two positions of a `Photon` along the `y` axis, in or out of the `Voxels`
     dy: i32,
+    ///  Distance between two positions of a `Photon` along the `z` axis, in or out of the `Voxels`
     dz: i32,
 }
 
+/// A `f64`-based 3D unitary vector used as the direction of a `PhotonPathSeg` random-length displacement in the simulation
 #[derive(Debug, Clone, Copy)]
-pub struct UnitVec {
+struct UnitVec {
+    /// Direction, along the `x` axis, of a `PhotonPathSeg` random-length displacement in the simulation
     pub ux: f64,
+    /// Direction, along the `y` axis, of a `PhotonPathSeg` random-length displacement in the simulation
     pub uy: f64,
+    /// Direction, along the `z` axis, of a `PhotonPathSeg` random-length displacement in the simulation
     pub uz: f64,
 }
+
 impl Default for UnitVec {
+    /// The default `{ ux: 0., uy: 0., uz: 1. }` direction that all new simulatad photon start with
     fn default() -> Self {
         Self { ux: 0., uy: 0., uz: 1. }
     }
 }
 
+/// Returns sin if parameter is cos and cos if parameter is sin
+fn co_sin(sin_or_cos: f64) -> f64 {
+    sin_or_cos.mul_add(-sin_or_cos, 1.).sqrt()
+}
+
 impl UnitVec {
+    /// Instantiates a new `UnitVec`    
     const fn new(ux: f64, uy: f64, uz: f64) -> Self {
         Self { ux, uy, uz }
     }
@@ -775,6 +868,8 @@ impl UnitVec {
             dz: (self.uz * len) as i32,
         }
     }
+
+    /// Changes the direction of the `PhotonPathSeg` so that it's refelected along the `z` axis.
     fn uz_reflected(&self) -> Self {
         //  Only .uz is reflected the other unitary element ux and uy stay the same.
         Self {
@@ -784,17 +879,27 @@ impl UnitVec {
         }
     }
 
-    fn same_refrac(&self, rng: &mut ThreadRng) -> Self {
+    /// Randomly changes the direction of the `PhotonPathSeg` to reflect displacement through matter with uniform `indice_refrac`
+    fn iso_refrac(&self, rng: &mut ThreadRng) -> Self {
+        /// Coefficient d'anisotropie
+        const G: f64 = 0.9;
+        const G_SQUARE: f64 = G * G;
+        const ONE_PLUS_G_SQUARE: f64 = 1. + G_SQUARE;
+        const ONE_MINUS_G_SQUARE: f64 = 1. - G_SQUARE;
+        const ONE_MINUS_G: f64 = 1. - G;
+        const TWO_G: f64 = 2. * G;
+        const ONE_ON_TWO_G: f64 = 1. / (2. * G);
+
         // xsi_2
         let phi = 2.0 * PI * rng.random::<f64>();
         let cos_phi = phi.cos();
         let sin_phi = phi.sin();
 
         //  xsi_3
-        let mut cos_theta = 1. / (2. * G)
-            * ((1. - G_SQUARE) / (2. * G).mul_add(rng.random::<f64>(), 1. - G)).mul_add(
-                -((1. - G_SQUARE) / (2. * G).mul_add(rng.random::<f64>(), 1. - G)),
-                1. + G_SQUARE,
+        let mut cos_theta = ONE_ON_TWO_G
+            * (ONE_MINUS_G_SQUARE / TWO_G.mul_add(rng.random::<f64>(), ONE_MINUS_G)).mul_add(
+                -(ONE_MINUS_G_SQUARE / TWO_G.mul_add(rng.random::<f64>(), ONE_MINUS_G)),
+                ONE_PLUS_G_SQUARE,
             );
         //  Ici aussi, pour éviter les erreurs arithmétiques flottantes cos doit être entre (-1, 1)
         cos_theta = cos_theta.clamp(-1., 1.);
@@ -812,27 +917,29 @@ impl UnitVec {
             let not_uz = co_sin(self.uz);
             let uz_cos_phi = self.uz * cos_phi;
             Self::new(
-                sin_theta * self.ux.mul_add(uz_cos_phi, -(self.uy * sin_phi)) / not_uz + cos_theta * self.ux,
-                sin_theta * self.uy.mul_add(uz_cos_phi, -(self.ux * sin_phi)) / not_uz + cos_theta * self.uy,
+                cos_theta.mul_add(self.ux, sin_theta * self.ux.mul_add(uz_cos_phi, -(self.uy * sin_phi)) / not_uz),
+                cos_theta.mul_add(self.uy, sin_theta * self.uy.mul_add(uz_cos_phi, -(self.ux * sin_phi)) / not_uz),
                 self.uz.mul_add(cos_theta, -(not_uz * sin_theta * cos_phi)),
             )
         }
     }
 
-    fn diff_refrac(&self, n1: f64, n2: f64, n1_on_n2: f64, rng: &mut ThreadRng) -> (Self, DeltaWCoeff) {
+    /// Changes the direction of the `PhotonPathSeg` to randomly simulate either reflexion or transmission
+    /// at matter interface with different `indice_refrac`.
+    fn aniso_refrac(&self, n1: f64, n2: f64, n1_on_n2: f64, rng: &mut ThreadRng) -> (Self, DeltaWCoeff) {
         let cos_theta_i = self.uz.abs().clamp(0., 1.); //  cos_theta_i in [0., 1.] range
         let sin_theta_i = co_sin(cos_theta_i); //  sin_theta_i in [0., 1.] range too.
 
         let sin_theta_t = (n1_on_n2 * sin_theta_i).clamp(0.0, 1.0); //  Loi de Snell-Descartes
 
-        //  Calcul de réflexion
+        //  Reflexion / Transmission computing
         //  We know this is likely because of known n1_on_n2 values larger than 1 and the clamping just above.
         #[allow(clippy::float_cmp)]
         if 1.0 == sin_theta_t {
             //  Complete internal reflexion
-            //  rng.random::<f64>() generates a random number over 0.0..1.0, so always < 1.0
-            //  therefore if 1.0 == sin_theta_t, r= sin_theta_t is guarantied > rng.random::<f64>()
-            //  without even having to call it.
+            //  rng.random::<f64>() generates a random number over 0.0..1.0, so always < 1.0.
+            //  Therefore, if 1.0 == sin_theta_t, r = sin_theta_t is always > rng.random::<f64>()
+            //  without even having to call the rng.
             //  Also r_square is 1.0, and delta_w_coeff = (1. - r_square) = 0.
             (self.uz_reflected(), DeltaWCoeff::default())
         } else {
@@ -858,14 +965,29 @@ impl UnitVec {
     }
 }
 
+/// A random-length displacement applied to a `Photon` for the few absorption cycles it takes to reach `0.`
 #[derive(Debug, Clone, Copy, Default)]
-pub struct PhotonPathSeg {
+struct PhotonPathSeg {
+    /// Loss of `weight` accumulated over the simulation cycles, until the `len_in_vxl` reaches 0.
     delta_w: f64,
+    /// Scalar part of the `PhotonPathSeg` displacement applied to a `Photon`
+    ///
+    /// Intialized with a random value by `skin.new_path_seg_len_in_vxl()` and
+    /// Decreased by `photon.moved_of()` until it reaches `0.`, after which a new one is created.
     pub len_in_vxl: f64,
+    /// Directional part of the `PhotonPathSeg` displacement applied to a `Photon`
+    ///
+    /// Intialized at `{ ux: 0., uy: 0., uz: 1. }` with every new `Photon`
+    /// Preserved as new `len_in_vxl` are random-generated reaches `0.` as the `Photon` is moved through `skin.absorption()`
+    /// Changed by `dir.uz_reflected()`, `dir.iso_refrac()` and `dir.aniso_refrac()` during `skin.absorption()`
     pub dir: UnitVec,
 }
 
 impl PhotonPathSeg {
+    /// Instantiates a new `PhotonPathSeg` with :
+    /// - `len_in_vxl` passed in parameter,
+    /// - `delta_w` of `0.` and
+    /// - `dir` of `UnitVec { ux: 0., uy: 0., uz: 1. }`
     #[must_use]
     pub fn new(len_in_vxl: f64) -> Self {
         Self {
@@ -873,11 +995,14 @@ impl PhotonPathSeg {
             ..Self::default()
         }
     }
+
+    /// Changes the `.dir` part of the `PhotonPathSeg` with a `new_dir` passed in parameter.
     const fn set_dir(&mut self, new_dir: UnitVec) {
         self.dir.ux = new_dir.ux;
         self.dir.uy = new_dir.uy;
         self.dir.uz = new_dir.uz;
     }
+
     /// Returns `f64` based `dir.uz * len_in_vxl` converted to `i32` based `dz`.
     /// Since we *know* that `len_in_vxl` can be extremely big (ln(0) = ∞, we prevent `0.` but not
     /// `f64::EPSILON`) it is entirely likely that some returned `dx`, `dy` and or `dz` ends up being
@@ -889,54 +1014,82 @@ impl PhotonPathSeg {
         //  which will definitely result in `skin.try_skin_layer()` to return `None`.
         (self.len_in_vxl * self.dir.uz) as i32
     }
+
+    /// Returns the whole `len_in_vxl` corresponding to a `dz` displacement along the `z` axis passed in parameter.
     fn len_in_vxl_from(&self, dz: i32) -> f64 {
         f64::from(dz) / self.dir.uz
     }
 }
+
+/// The `Photon` model used in the simulation
 #[derive(Debug)]
 struct Photon {
-    // skin: &'a mut Skin,
+    /// Weight of this `Photon`, progressively reduced until it reaches `SEUIL_DE_POIDS_CRITIQUE` at the end of its simulation
     weight: f64,
+    /// Conveniently tracks in which `skin_layer` this `Photon` is now located (derived from `Photon.pos`)
     skin_layer_kind: SkinLayerKind,
+    /// Position of this `Photon`, in or out of the `Voxels`
     pub pos: VoxelPos,
+    /// Random-length displacement to be applied to this `Photon` for the few absorption cycles it takes to reach `0.`
     pub path_seg: PhotonPathSeg,
 }
 
 impl Photon {
+    /// Instantiates a new `Photon` with :
+    /// - `weight` of `0.`,
+    /// - `skin_layer_kind` of `SkinLayerKind::StratumCorneum`,
+    /// - `pos.x` of `VXLS_X_SIZE / 2`,
+    /// - `pos.y` of `VXLS_Y_SIZE / 2`,
+    /// - `pos.z` of `0.`,
+    /// - `path_seg.len_in_vxl` randomly initialized,
+    /// - `path_seg.delta_w` of `0.`,
+    /// - `path_seg.dir` of `UnitVec { ux: 0., uy: 0., uz: 1. }`
+    ///
     pub fn new(skin: &Skin, rng: &mut ThreadRng) -> Self {
         let skin_layer_kind = StratumCorneum;
         let path_seg = PhotonPathSeg::new(skin.new_path_seg_len_in_vxl(skin_layer_kind, rng));
 
         Self {
             weight: 1.0,
+            skin_layer_kind,
             pos: VoxelPos {
                 x: VXLS_X_SIZE / 2,
                 y: VXLS_Y_SIZE / 2,
                 z: 0,
             },
             path_seg,
-            skin_layer_kind,
         }
     }
 
+    /// Returns `.path_seg.delta_w`
     pub const fn path_seg_delta_w(&self) -> f64 {
         self.path_seg.delta_w
     }
+
+    /// Returns `.weight - .path_seg.delta_w`
     pub fn adjusted_weight(&self) -> f64 {
         self.weight - self.path_seg.delta_w
     }
+
+    /// Increases the `.path_seg.delta_w` by the `delta_w_coeff` passed in parameter, times the `photon.adjusted_weight()`
     pub fn increase_path_seg_delta_w_by(&mut self, delta_w_coeff: DeltaWCoeff) {
         self.path_seg.delta_w += delta_w_coeff.0 * self.adjusted_weight();
     }
+
+    /// Sets `.weight` to the `.adjusted_weight()`, and reset `.path_seg.delta_w` to `0.`
     pub fn apply_and_reset_path_seg_delta_w(&mut self) {
         self.weight = self.adjusted_weight();
         self.path_seg.delta_w = 0.;
     }
-    pub fn scale_weight_by(&mut self, m: f64) {
+
+    /// Scales this `photon.adjusted_weight()` (so, both its `.weight` and `path_seg.delta_w`),
+    /// by a factor `m` passed in parameter
+    pub fn scale_adjusted_weight_by(&mut self, m: f64) {
         self.weight *= m;
         self.path_seg.delta_w *= m;
     }
 
+    /// Randomly generate a new `.path_seg.len_in_vxl` for this `photon` next simulation cycles.
     pub fn generate_next_path_seg(&mut self, skin: &Skin, rng: &mut ThreadRng) {
         self.path_seg.len_in_vxl = skin.new_path_seg_len_in_vxl(self.skin_layer_kind, rng);
     }
@@ -951,20 +1104,46 @@ impl Photon {
         self.pos.move_of(self.path_seg.dir.delta_pos(moving_len))
     }
 
+    /// Returns the `SkinLayer` for this `photon.skin_layer_kind`
     pub const fn skin_layer(&self, skin: &Skin) -> &SkinLayer {
         skin.skin_layer(self.skin_layer_kind).layer
     }
 }
 
-/// Return sin if cos and cos if sin
-fn co_sin(sin_or_cos: f64) -> f64 {
-    sin_or_cos.mul_add(-sin_or_cos, 1.).sqrt()
-}
+/// Runs a Monte Carlo simulation
+///
+/// ### Parameters
+///
+/// - `nb_photons` - the number of photons to simulate
+/// - `wavelength` -  the wavelength of the photons to simulate, in nm
+/// - `chunk_size` - the size of the chunk of photons that will be passed to parallel processing instances of this simulation
+///     - a `chunk_size` equal to `nb_photons` runs the simulation without parallelism
+///     - a `chunk_size` equal to `(nb_photons / std::thread::available_parallelism()?.get()) + 1` runs the simulation
+///       with the maximal parallel computing ressources available
+/// - `verbose` - the verbosity of the simulation
+///
+/// ### Returns
+///
+/// `Some` `ndarray::Array2<f64>` of the simulation accumulated `Photon`s `weight` losses, as a slice of `Voxels` along
+/// the XZ axis, or `None` if the `Wavelength` is not supported
+#[must_use]
+pub fn monte_carlo(
+    nb_photons: usize,
+    wavelength: Wavelength,
+    chunk_size: usize,
+    verbose: bool,
+) -> Option<VoxelsSliceXZ> {
+    /// Seuil de poids critique qui établit une limite à la simulation de chaque photon.
+    const SEUIL_DE_POIDS_CRITIQUE: f64 = 0.01;
+    /// En dessous d’un `SEUIL_DE_POIDS_CRITIQUE` prédéterminé, le paquet a une chance sur `M` de continuer à être simulé,
+    /// sinon "il disparaı̂t". Pour éviter que de l’énergie disparaisse pris dans l'ensemble, lorsque le photon survie,
+    /// on multiplie son énergie par `M` afin de compenser pour les fois ou l’énergie disparait.
+    const M: f64 = 10.;
+    /// Probabilité qu'un photon continue à être simulé lorsque son `weight` atteint le `SEUIL_DE_POIDS_CRITIQUE`
+    const M_INV: f64 = 1. / M; //  Probabilité de ne pas disparitre
 
-/// wavelength in nm
-fn monte_carlo(nb_photons: usize, wavelength_u: u16, chunk_size: usize, verbose: bool) -> Option<Array2<f64>> {
     let mut skin = Skin::default();
-    skin.try_model_at(wavelength_u).map(|skin| {
+    skin.try_model_at(wavelength).map(|skin| {
         if verbose { println!("{skin:#?}" ); }
             (0..nb_photons)
             .into_par_iter()
@@ -1003,7 +1182,7 @@ fn monte_carlo(nb_photons: usize, wavelength_u: u16, chunk_size: usize, verbose:
                             //  is multiplied by M so to compensate all the other cases where energy disappears.
                             #[allow(clippy::while_float)]                     //  Roulette !  (xsi_4)
                             if photon.adjusted_weight() < SEUIL_DE_POIDS_CRITIQUE  &&  rng.random::<f64>() < M_INV {
-                                photon.scale_weight_by(M);
+                                photon.scale_adjusted_weight_by(M);
                             }
                         }
                         else {  //  ! within(vxls) 
