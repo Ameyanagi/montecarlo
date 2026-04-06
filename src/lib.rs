@@ -71,7 +71,6 @@ pub fn run(k_photon: u16, wavelength: Wavelength, verbose: bool) -> Result<()> {
 ///
 /// May return `Err` from the `ruviz` crate `Plot` command
 pub fn plot(vxl_xz_slice: &mut VoxelsSliceXZ, k_photon: u16, wavelength: Wavelength, verbose: bool) -> Result<()> {
-    vxl_xz_slice.par_mapv_inplace(f64::log10);
     let binding = vxl_xz_slice.t();
     let view = binding.slice(s![..;-1, ..]);
 
@@ -85,17 +84,17 @@ pub fn plot(vxl_xz_slice: &mut VoxelsSliceXZ, k_photon: u16, wavelength: Wavelen
             &view,
             Some(
                 HeatmapConfig::new()
+                     .value_scale(AxisScale::SymLog { linthresh: (0.000_001) })
                      .colorbar(true)
                      .colorbar_label("Absorbed Energy")
             ),
         )
         .xlim(0., x_axis_scaling)
         .xlabel("Position in x(mm)")
-        // .ylim(0., z_axis_scaling)
         .ylim(z_axis_scaling, 0.)
         .ylabel("Depth (mm)")
         .title(format!("{k_photon}k photons at {}nm", wavelength.0))
-        .save(format!(".heatmap-{}nm{k_photon}kphoton.png", wavelength.0))?;
+        .save(format!("heatmap-{}nm{k_photon}kphoton.png", wavelength.0))?;
 
     if verbose {
         println!("Plot finished in {:?}", start.elapsed());
@@ -1159,7 +1158,6 @@ pub fn monte_carlo(
 
                 for nth_photon in chunk {
                     let mut  photon = Photon::new(skin, &mut rng);
-                    // if nth_photon % 1_000 == 0 { dbg!(&nth_photon, &photon); }
                     #[allow(clippy::while_float)]
                     while SEUIL_DE_POIDS_CRITIQUE < photon.adjusted_weight() {
 
