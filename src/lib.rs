@@ -43,7 +43,7 @@ pub fn run(k_photon: u16, wavelength: Wavelength, verbose: bool) -> Result<()> {
 
     let op_vxls = monte_carlo(nb_photons, wavelength, chunk_size, verbose);
     println!(
-        "monte_carlo of {k_photon}k photon at {}nm finished on {available_parallelism} cores in {:?}",
+        "monte_carlo of {k_photon}k photons at {}nm finished on {available_parallelism} cores in {:?}",
         wavelength.0,
         start.elapsed()
     );

@@ -18,7 +18,7 @@ Options:
   -h, --help                     Print help
 
 > montecarlo -k 200 -w 610
-monte_carlo of 200k photon at 610nm finished on 12 cores in 483.192083ms
+monte_carlo of 200k photons at 610nm finished on 12 cores in 483.192083ms
 ```
 ![200k photon at 610nm](assets/heatmap-610nm200kphoton.png)
 ## License
