@@ -2,6 +2,25 @@
 
 Monte carlo simulation of photons propagation in skin
 
+Anecdotally, the simulation time is reduced by over _800_ times vs an original model in `python`.
+
+## Quick Start
+```
+>  montecarlo --help
+Monte carlo simulation of photons propagation in skin
+
+Usage: montecarlo [OPTIONS]
+
+Options:
+  -k, --kphoton <KPHOTON>        Number of 1'000s of photon to simulate [default: 100]
+  -w, --wavelenght <WAVELENGHT>  Wavelength of the photons, in nm (many even ìnteger between 600 and 1000 allowed) [default: 700]
+  -v, --verbose                  Verbosity
+  -h, --help                     Print help
+
+> montecarlo -k 200 -w 610
+monte_carlo of 200k photon at 610nm finished on 12 cores in 483.192083ms
+```
+![200k photon at 610nm](assets/heatmap-610nm200kphoton.png)
 ## License
 
 Licensed under either of
