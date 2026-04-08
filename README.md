@@ -2,7 +2,7 @@
 
 Monte carlo simulation of photons propagation in skin
 
-Anecdotally, the simulation time is reduced by over _800_ times vs an original model in `python`.
+Anecdotally, the simulation time is reduced by over _400_ times vs an original model in `python`.
 
 ## Quick Start
 ```
@@ -21,6 +21,7 @@ Options:
 monte_carlo of 200k photons at 610nm finished on 12 cores in 483.192083ms
 ```
 ![200k photon at 610nm](assets/heatmap-610nm200kphoton.png)
+
 ## License
 
 Licensed under either of

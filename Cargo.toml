@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Monte carlo simulation of photons propagation in skin"
 license = "MIT OR Apache-2.0"
-authors = ["François Desloges"]
+authors = ["fdlgs <fdesloges@hotmail.com>"]
 repository = "https://github.com/fdlgs/montecarlo"
 readme = "README.md"
 
