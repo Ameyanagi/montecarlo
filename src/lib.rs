@@ -84,9 +84,10 @@ pub fn plot(vxl_xz_slice: &mut VoxelsSliceXZ, k_photon: u16, wavelength: Wavelen
             &view,
             Some(
                 HeatmapConfig::new()
-                     .value_scale(AxisScale::SymLog { linthresh: (0.000_001) })
-                     .colorbar(true)
-                     .colorbar_label("Absorbed Energy")
+                    .value_scale(AxisScale::Log)
+                    .extent(0.0, x_axis_scaling, 0.0, z_axis_scaling)
+                    .colorbar(true)
+                    .colorbar_label("Absorbed Energy"),
             ),
         )
         .xlim(0., x_axis_scaling)
